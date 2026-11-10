@@ -1,0 +1,19 @@
+{
+  "name": "ciudadan-media-player",
+  "version": "1.0.0",
+  "description": "Reproductor de escritorio Ciudadan: YouTube mediante libVLC (yt-dlp + proxy local, sin descarga completa)",
+  "main": "src/main.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test:libvlc": "node tools/test-libvlc.mjs",
+    "test:proxy": "node tools/test-proxy.mjs"
+  },
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0"
+  }
+}

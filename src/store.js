@@ -5,6 +5,7 @@
 // Los vídeos se identifican por su ID canónico de YouTube y conservan sus
 // metadatos básicos para poder volver a mostrarlos sin volver a buscar.
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 export const FAVORITES_LIST_ID = 'favorites';
@@ -80,15 +81,34 @@ export class UserStore {
     this._saveTimer = setTimeout(() => this.flush(), 150);
   }
 
-  flush() {
+  // La escritura es ASÍNCRONA: guardar la cola/listas escribía un fichero
+  // nuevo en disco de forma síncrona y el antivirus lo analizaba en ese
+  // momento, bloqueando el hilo principal de Electron (la app se trababa
+  // al añadir o mover elementos de la cola). Las escrituras se encadenan para
+  // que nunca haya dos a la vez sobre el mismo fichero.
+  // Con sync=true (solo al cerrar la app) se escribe de forma síncrona.
+  flush(sync = false) {
     if (this._saveTimer) { clearTimeout(this._saveTimer); this._saveTimer = null; }
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      const tmp = this.file + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-      fs.renameSync(tmp, this.file);
-      return true;
-    } catch { return false; }
+    const snapshot = JSON.stringify(this.data, null, 2);
+    if (sync) {
+      try {
+        fs.mkdirSync(path.dirname(this.file), { recursive: true });
+        const tmp = this.file + '.tmp';
+        fs.writeFileSync(tmp, snapshot, 'utf8');
+        fs.renameSync(tmp, this.file);
+        return true;
+      } catch { return false; }
+    }
+    this._writeChain = (this._writeChain || Promise.resolve())
+      .then(async () => {
+        await fsp.mkdir(path.dirname(this.file), { recursive: true });
+        const tmp = this.file + '.tmp';
+        await fsp.writeFile(tmp, snapshot, 'utf8');
+        await fsp.rename(tmp, this.file);
+        return true;
+      })
+      .catch(() => false);
+    return this._writeChain;
   }
 
   // --- listas ---------------------------------------------------------------

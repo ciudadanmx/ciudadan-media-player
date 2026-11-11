@@ -43,9 +43,23 @@ function sha256(file) {
 // ---------------------------------------------------------------------------
 let api = { port: API_PORT, token: API_TOKEN };
 
+// fetch con reintento: al abortar la conexión SSE, el pool de conexiones de
+// undici puede reutilizar un socket ya cerrado y la petición falla con
+// "fetch failed". Es un artefacto del cliente HTTP, no del reproductor.
+async function fetchRetry(url, init = {}, tries = 3) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try { return await fetch(url, init); } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 async function apiGet(p, useToken = true) {
   const headers = useToken ? { Authorization: 'Bearer ' + api.token } : {};
-  const res = await fetch(`http://127.0.0.1:${api.port}${p}`, { headers });
+  const res = await fetchRetry(`http://127.0.0.1:${api.port}${p}`, { headers });
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 async function apiState() {
@@ -53,7 +67,7 @@ async function apiState() {
   return r.body && r.body.state ? r.body.state : null;
 }
 async function apiCmd(command, args = {}, id = null) {
-  const res = await fetch(`http://127.0.0.1:${api.port}/cmd`, {
+  const res = await fetchRetry(`http://127.0.0.1:${api.port}/cmd`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + api.token },
     body: JSON.stringify({ command, args, id }),

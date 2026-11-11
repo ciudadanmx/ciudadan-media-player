@@ -29,9 +29,11 @@ export function loadLibvlc(extraArgs = []) {
   const EventCb = koffi.proto('void libvlc_event_cb_t(const libvlc_event_t *event, void *user_data)');
 
   const api = {
-    libvlc_new: lib.func('libvlc_instance_t *libvlc_new(int argc, char **argv)'), // OJO: 'const char *const argv[]' tumba a koffi; char** con array JS funciona
-    libvlc_release: lib.func('void libvlc_release(libvlc_instance_t *instance)'),
-    libvlc_media_new_location: lib.func('libvlc_media_t *libvlc_media_new_location(libvlc_instance_t *instance, const char *mrl)'),
+    // La instancia se maneja como DIRECCIÓN (uintptr_t) para poder crearla en
+    // un hilo worker y usarla desde el hilo principal (ver vlc-instance-worker).
+    libvlc_new: lib.func('uintptr_t libvlc_new(int argc, char **argv)'), // OJO: 'const char *const argv[]' tumba a koffi; char** con array JS funciona
+    libvlc_release: lib.func('void libvlc_release(uintptr_t instance)'),
+    libvlc_media_new_location: lib.func('libvlc_media_t *libvlc_media_new_location(uintptr_t instance, const char *mrl)'),
     libvlc_media_add_option: lib.func('void libvlc_media_add_option(libvlc_media_t *media, const char *option)'),
     libvlc_media_release: lib.func('void libvlc_media_release(libvlc_media_t *media)'),
     libvlc_media_player_new_from_media: lib.func('libvlc_media_player_t *libvlc_media_player_new_from_media(libvlc_media_t *media)'),
@@ -67,23 +69,76 @@ export function loadLibvlc(extraArgs = []) {
 }
 
 export class VlcPlayer {
-  constructor({ hwnd = null, dummyOutput = false, onEvent = null } = {}) {
+  /**
+   * Crea el reproductor. La instancia de libVLC se crea en un HILO WORKER
+   * (no bloquea el hilo principal) y se reutiliza aquí desde su dirección.
+   * @param {object} opts
+   * @returns {Promise<VlcPlayer>}
+   */
+  static async create(opts = {}) {
+    const { createVlcInstance } = await import('./vlc-instance.js');
+    const address = await createVlcInstance(opts.args || null, opts.dummyOutput === true);
+    if (!address) throw new Error('libvlc_new falló (sin instancia)');
+    return new VlcPlayer({ ...opts, instance: address });
+  }
+
+  constructor({ hwnd = null, dummyOutput = false, onEvent = null, onTiming = null, instance = null } = {}) {
     this.api = loadLibvlc();
     const t = this.api._types;
-    const args = ['--ignore-config', '--no-video-title-show', '--no-stats'];
-    if (dummyOutput) { args.push('--vout=dummy', '--aout=dummy'); }
-    else { args.push('--vout=direct3d11'); }
-    this.instance = this.api.libvlc_new(args.length, args); // koffi: array JS de strings -> char**
+    // --ignore-config evita que la configuración personal de VLC del usuario
+    // (vlcrc) influya en el reproductor. Se puede desactivar con
+    // CMP_VLC_IGNORE_CONFIG=0 para que VLC use su CACHÉ de plugins: sin caché,
+    // libVLC escanea los 366 plugins en cada arranque y con el antivirus activo
+    // eso puede tardar minutos (la app se quedaba "congelada" al abrir).
+    const ignoreConfig = process.env.CMP_VLC_IGNORE_CONFIG !== '0';
+    this._args = [];
+    if (ignoreConfig) this._args.push('--ignore-config');
+    this._args.push('--no-video-title-show', '--no-stats');
+    if (dummyOutput) this._args.push('--vout=dummy', '--aout=dummy');
+    else this._args.push('--vout=direct3d11');
+    if (instance) {
+      // Instancia ya creada (en otro hilo): se reutiliza su dirección.
+      this.instance = Number(instance);
+    } else {
+      this.instance = Number(this.api.libvlc_new(this._args.length, this._args)); // koffi: array JS de strings -> char**
+    }
     if (!this.instance) throw new Error('libvlc_new falló: ' + this.api.libvlc_errmsg());
-    this.player = this.api.libvlc_media_player_new_from_media?.call ? null : null;
     this.player = null;
     this.onEvent = onEvent || (() => {});
+    this.onTiming = onTiming || null;
     this._callbacks = [];
-    if (hwnd) {
-      const buf = Buffer.isBuffer(hwnd) ? hwnd : Buffer.from(hwnd);
-      this.api.libvlc_media_player_set_hwnd; // ensure symbol
-    }
     this._hwnd = hwnd;
+    // --- Control de concurrencia y caché -------------------------------------
+    // Las llamadas a libVLC pueden quedarse bloqueadas (stop()/play()). Si se
+    // hacen en el hilo principal, Electron se congela entero (la UI, la API y
+    // el reloj). Por eso:
+    //   * las operaciones se ejecutan ASÍNCRONAS (hilo worker de koffi),
+    //   * se encolan en serie (nunca dos llamadas simultáneas al player),
+    //   * las lecturas de estado se cachean y, mientras hay una operación en
+    //     curso, se devuelve la caché sin tocar libVLC.
+    this._busy = 0;
+    this._chain = Promise.resolve();
+    this._last = { state: 0, time: 0, length: 0, volume: 100, mute: false };
+  }
+
+  /** true si hay una operación bloqueante en curso (no se consulta libVLC). */
+  get busy() { return this._busy > 0; }
+
+  // Ejecuta una operación en serie y sin bloquear el hilo principal.
+  _enqueue(fn) {
+    this._busy++;
+    const run = this._chain.then(() => fn());
+    this._chain = run.then(() => {}, () => {});
+    return run.finally(() => { this._busy--; });
+  }
+
+  // Llamada FFI asíncrona (koffi la ejecuta en un hilo worker).
+  _call(fn, ...args) {
+    return new Promise((resolve, reject) => {
+      try {
+        fn.async(...args, (err, res) => (err ? reject(err) : resolve(res)));
+      } catch (e) { reject(e); }
+    });
   }
 
   attachEvents() {
@@ -91,7 +146,10 @@ export class VlcPlayer {
     const t = this.api._types;
     const self = this;
     for (const [name, code] of Object.entries(EV)) {
-      if (!['Playing', 'Paused', 'Stopped', 'EndReached', 'EncounteredError', 'TimeChanged', 'LengthChanged', 'Buffering', 'Opening', 'SeekableChanged'].includes(name)) continue;
+      // Se ignoran los eventos de alta frecuencia (LengthChanged/TimeChanged):
+      // llegan varias veces por segundo y cada uno disparaba una sincronización
+      // y una escritura de log. La posición se obtiene del sondeo periódico.
+      if (!['Playing', 'Paused', 'Stopped', 'EndReached', 'EncounteredError', 'Buffering', 'Opening', 'SeekableChanged'].includes(name)) continue;
       const cb = koffi.register((event, user) => {
         try { self.onEvent({ type: code, name }); } catch {}
       }, koffi.pointer(t.EventCb));
@@ -100,60 +158,162 @@ export class VlcPlayer {
     }
   }
 
-  play(mrl, { hwnd = null, mediaOptions = [] } = {}) {
-    const a = this.api;
-    const media = a.libvlc_media_new_location(this.instance, mrl);
-    if (!media) throw new Error('libvlc_media_new_location falló: ' + a.libvlc_errmsg());
-    for (const opt of mediaOptions) a.libvlc_media_add_option(media, opt);
-    if (!this.player) {
-      this.player = a.libvlc_media_player_new_from_media(media);
-      if (!this.player) throw new Error('libvlc_media_player_new_from_media falló');
-      const h = hwnd ?? this._hwnd;
-      if (h) {
-        const buf = Buffer.isBuffer(h) ? h : Buffer.from(h);
-        const val = buf.length >= 8 ? buf.readBigUInt64LE(0) : BigInt(buf.readUInt32LE(0));
-        a.libvlc_media_player_set_hwnd(this.player, val);
+  // Reproduce un medio. Devuelve una promesa: el hilo principal NO se bloquea
+  // aunque stop()/play() tarden dentro de libVLC.
+  async play(mrl, { hwnd = null, mediaOptions = [] } = {}) {
+    return this._enqueue(async () => {
+      const a = this.api;
+      const t0 = Date.now();
+      const media = a.libvlc_media_new_location(this.instance, mrl);
+      if (!media) throw new Error('libvlc_media_new_location falló: ' + a.libvlc_errmsg());
+      for (const opt of mediaOptions) a.libvlc_media_add_option(media, opt);
+      const tMedia = Date.now();
+      if (!this.player) {
+        this.player = a.libvlc_media_player_new_from_media(media);
+        if (!this.player) { a.libvlc_media_release(media); throw new Error('libvlc_media_player_new_from_media falló'); }
+        const h = hwnd ?? this._hwnd;
+        if (h) {
+          const buf = Buffer.isBuffer(h) ? h : Buffer.from(h);
+          const val = buf.length >= 8 ? buf.readBigUInt64LE(0) : BigInt(buf.readUInt32LE(0));
+          a.libvlc_media_player_set_hwnd(this.player, val);
+        }
+        this.attachEvents();
+        // El motor arranca con el volumen por defecto de su propia configuración:
+        // se fuerza el volumen pedido para que el sonido nunca salga bajo.
+        try { await this._call(a.libvlc_audio_set_volume, this.player, this._last.volume); } catch {}
+        try { await this._call(a.libvlc_audio_set_mute, this.player, this._last.mute ? 1 : 0); } catch {}
+      } else {
+        // Patrón recomendado de libVLC: reutilizar el MISMO media player y sólo
+        // cambiar el media. Liberar y recrear el player tras un EndReached provoca
+        // crash 0xC0000005 dentro de libVLC.
+        // OJO: si el medio ya terminó (EndReached) NO se llama a stop(): en ese
+        // momento libVLC está destruyendo el vout y stop() puede tumbar el motor.
+        let st = 0;
+        try { st = await this._call(a.libvlc_media_player_get_state, this.player); } catch {}
+        if (st !== 6) {
+          try { await this._call(a.libvlc_media_player_stop, this.player); } catch {}
+        }
+        a.libvlc_media_player_set_media(this.player, media);
       }
-      this.attachEvents();
-    } else {
-      // Patrón recomendado de libVLC: reutilizar el MISMO media player y sólo
-      // cambiar el media. Liberar y recrear el player tras un EndReached provoca
-      // crash 0xC0000005 dentro de libVLC.
-      // OJO: si el medio ya terminó (EndReached) NO se llama a stop(): en ese
-      // momento libVLC está destruyendo el vout y stop() puede tumbar el motor.
-      let st = 0;
-      try { st = a.libvlc_media_player_get_state(this.player); } catch {}
-      if (st !== 6) { try { a.libvlc_media_player_stop(this.player); } catch {} }
-      a.libvlc_media_player_set_media(this.player, media);
-    }
-    a.libvlc_media_release(media);
-    const rc = a.libvlc_media_player_play(this.player);
-    return rc;
+      const tPlayer = Date.now();
+      a.libvlc_media_release(media);
+      const rc = await this._call(a.libvlc_media_player_play, this.player);
+      const tPlay = Date.now();
+      this.onTiming?.({
+        media: tMedia - t0, player: tPlayer - tMedia, play: tPlay - tPlayer, total: tPlay - t0,
+      });
+      this._last.state = 3;
+      this._last.time = 0;
+      return rc;
+    });
   }
 
   pause() { if (this.player) this.api.libvlc_media_player_pause(this.player); }
-  // Fija el estado de pausa de forma explícita (no alterna como pause()).
-  setPaused(on) { if (this.player) this.api.libvlc_media_player_set_pause(this.player, on ? 1 : 0); }
-  isPaused() { return this.player ? this.api.libvlc_media_player_get_state(this.player) === 4 : false; }
-  version() { try { return String(this.api.libvlc_get_version()); } catch { return 'desconocida'; } }
-  stop() {
-    if (!this.player) return;
-    // Si el medio ya terminó (EndReached), libVLC está destruyendo el vout en ese
-    // momento y llamar a stop() provoca un crash 0xC0000005 dentro de libVLC.
-    const st = this.api.libvlc_media_player_get_state(this.player);
-    if (st === 6) return; // EndReached
-    this.api.libvlc_media_player_stop(this.player);
+  // Reanuda un medio parado sin bloquear el hilo principal.
+  async resume() {
+    if (!this.player) return -1;
+    return this._enqueue(async () => await this._call(this.api.libvlc_media_player_play, this.player));
   }
-  isPlaying() { return this.player ? !!this.api.libvlc_media_player_is_playing(this.player) : false; }
-  getState() { return this.player ? this.api.libvlc_media_player_get_state(this.player) : 0; }
-  getTime() { return this.player ? Number(this.api.libvlc_media_player_get_time(this.player)) : 0; } // ms
-  setTime(ms) { if (this.player) this.api.libvlc_media_player_set_time(this.player, BigInt(Math.round(ms))); }
-  getLength() { return this.player ? Number(this.api.libvlc_media_player_get_length(this.player)) : 0; } // ms
-  setVolume(v) { if (this.player) return this.api.libvlc_audio_set_volume(this.player, Math.max(0, Math.min(200, Math.round(v)))); return -1; }
-  getVolume() { if (this.player) { const v = this.api.libvlc_audio_get_volume(this.player); return v < 0 ? 0 : v; } return 0; }
-  setMute(on) { if (this.player) return this.api.libvlc_audio_set_mute(this.player, on ? 1 : 0); return -1; }
-  getMute() { if (this.player) return !!this.api.libvlc_audio_get_mute(this.player); return false; }
-  getPosition() { return this.player ? this.api.libvlc_media_player_get_position(this.player) : 0; }
+  // Fija el estado de pausa de forma explícita (no alterna como pause()).
+  async setPaused(on) {
+    if (!this.player) return -1;
+    return this._call(this.api.libvlc_media_player_set_pause, this.player, on ? 1 : 0);
+  }
+  // El salto (seek) puede tardar dentro de libVLC: se hace fuera del hilo principal.
+  async setTime(ms) {
+    if (!this.player) return -1;
+    return this._call(this.api.libvlc_media_player_set_time, this.player, BigInt(Math.round(ms)));
+  }
+  isPaused() { return this.getState() === 4; }
+  version() { try { return String(this.api.libvlc_get_version()); } catch { return 'desconocida'; } }
+  // Detiene el medio sin bloquear el hilo principal.
+  async stop() {
+    if (!this.player) return;
+    return this._enqueue(async () => {
+      // Si el medio ya terminó (EndReached), libVLC está destruyendo el vout en ese
+      // momento y llamar a stop() provoca un crash 0xC0000005 dentro de libVLC.
+      // La lectura del estado es ASÍNCRONA: una FFI síncrona puede congelar la app.
+      let st = this._last.state;
+      try { st = await this._call(this.api.libvlc_media_player_get_state, this.player); } catch {}
+      if (st === 6) return; // EndReached
+      await this._call(this.api.libvlc_media_player_stop, this.player);
+    });
+  }
+
+  // --- Lecturas de estado: SIEMPRE desde la caché, nunca FFI síncrono --------
+  // Una llamada FFI síncrona a libVLC puede quedarse bloqueada varios segundos
+  // (get_time/get_state esperan al vout). Como esas llamadas sehacían desde el
+  // hilo principal, la app entera se congelaba: la UI no respondía y el API de
+  // control tardaba 6-30 s. Ahora las lecturas se hacen ASÍNCRONAS (sync()) y
+  // el resto del código lee siempre la caché, que se refresca cada segundo.
+  isPlaying() { return this.getState() === 3; }
+  getState() { return this._last.state; }
+  getTime() { return this._last.time; } // ms
+  getLength() { return this._last.length; } // ms
+
+  // Refresca la caché de estado con llamadas FFI ASÍNCRONAS (no bloquean).
+  // No llama a libVLC si hay una operación en curso (el motor está ocupado).
+  async sync() {
+    if (!this.player || this.busy) return this._last;
+    const t0 = Date.now();
+    const a = this.api;
+    try {
+      const st = await this._call(a.libvlc_media_player_get_state, this.player);
+      if (typeof st === 'number') this._last.state = st;
+    } catch {}
+    try {
+      const t = await this._call(a.libvlc_media_player_get_time, this.player);
+      if (t !== undefined && t !== null) this._last.time = Number(t);
+    } catch {}
+    try {
+      const l = await this._call(a.libvlc_media_player_get_length, this.player);
+      if (l !== undefined && l !== null) this._last.length = Number(l);
+    } catch {}
+    // El volumen REAL del motor: la caché optimista puede divergir (y entonces
+    // la interfaz marca 100 mientras el sonido sale bajo). Se relee del motor,
+    // pero no en cada ciclo: el volumen cambia muy rara vez y cada llamada FFI
+    // cuesta un paso por el hilo de trabajo de koffi.
+    this._syncCount = (this._syncCount || 0) + 1;
+    if (this._syncCount % 4 === 1) {
+      try {
+        const v = await this._call(a.libvlc_audio_get_volume, this.player);
+        if (typeof v === 'number' && v >= 0) this._last.volume = v;
+      } catch {}
+      try {
+        const m = await this._call(a.libvlc_audio_get_mute, this.player);
+        if (typeof m === 'number') this._last.mute = !!m;
+      } catch {}
+    }
+    // El coste de esta sincronización se mide: si sube, el sondeo se está
+    // comiendo el hilo principal (y con él, la interfaz y el API).
+    this.lastSyncMs = Date.now() - t0;
+    return this._last;
+  }
+  // --- Ajustes: llamadas ASÍNCRONAS (una FFI síncrona puede congelar la app) --
+  async setVolume(v) {
+    const val = Math.max(0, Math.min(200, Math.round(v)));
+    this._last.volume = val;
+    if (!this.player) return -1;
+    return this._call(this.api.libvlc_audio_set_volume, this.player, val);
+  }
+  getVolume() {
+    // El volumen real se relee del motor en sync(); la caché es sólo el valor
+    // optimista entre sincronizaciones.
+    return this._last.volume;
+  }
+  async setMute(on) {
+    this._last.mute = !!on;
+    if (!this.player) return -1;
+    return this._call(this.api.libvlc_audio_set_mute, this.player, on ? 1 : 0);
+  }
+  getMute() { return this._last.mute; }
+  // La posición es redundante: se deriva de tiempo/duración (evita una llamada
+  // FFI más en cada sondeo).
+  getPosition() {
+    const len = this.getLength();
+    if (!len) return 0;
+    return Math.max(0, Math.min(1, this.getTime() / len));
+  }
 
   // safe=true: NO libera el media player si sigue en reproducción (al salir de la app).
   //           stopping/releasing un player activo puede tumbar libVLC con 0xC0000005

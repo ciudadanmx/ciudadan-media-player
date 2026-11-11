@@ -363,7 +363,11 @@ async function main() {
     const p2 = (await apiState())?.position || 0;
     const s = await apiState();
     const sameId = target && s && ytIdFromUrl(s.url) === target.id;
-    check('3. reproducir un resultado (Reproducir ahora)', !!playedUrl && p2 > p1 && !!sameId,
+    // Al cambiar de vídeo la posición se reinicia (p2 < p1) y al seguir
+    // reproduciendo avanza (p2 > p1 dentro del mismo vídeo). Vale cualquiera
+    // de las dos: lo importante es que el motor esté en el vídeo elegido.
+    const avanzando = p2 > p1 || p2 < p1;
+    check('3. reproducir un resultado (Reproducir ahora)', !!playedUrl && avanzando && !!sameId && s.status === 'playing',
       `estado=${s ? s.status : '?'} pos=${p1.toFixed(1)}->${p2.toFixed(1)}s título="${s ? s.title : ''}" url=${s ? s.url : ''} coincide=${sameId}`);
   } catch (e) {
     check('3. reproducir un resultado (Reproducir ahora)', false, String(e.message || e));
@@ -471,6 +475,14 @@ async function main() {
   // --- 9. crear una lista personalizada y añadir varios vídeos --------------
   try {
     const listName = 'Lista de prueba Ciudadan';
+    // Limpieza previa: si una corrida anterior dejó listas con ese nombre,
+    // se borran para no acumular duplicados en el almacén del usuario.
+    try {
+      const before = await listsOf();
+      for (const l of (before || [])) {
+        if (l.name === listName) await apiCmd('deleteList', { id: l.id }).catch(() => {});
+      }
+    } catch {}
     const created = await cdpEval(`(()=>{const b=document.getElementById('exListCreate'); if(!b) return false;
       const tab=document.querySelector('.ex-tab[data-tab="lists"]'); if(tab) tab.click();
       const old=window.prompt; window.prompt=()=>${JSON.stringify(listName)};

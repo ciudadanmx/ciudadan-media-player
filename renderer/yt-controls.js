@@ -7,6 +7,7 @@ const body = document.body;
 const playBtn = $('play'), icoPlay = $('icoPlay'), icoPause = $('icoPause');
 const stopBtn = $('stop'), prevBtn = $('prev'), nextBtn = $('next');
 const searchBtn = $('search'), plToggle = $('plToggle'), plClose = $('plClose');
+const plBack = $('plBack'), plTitle = $('plTitle');
 const fullBtn = $('full'), icoFull = $('icoFull'), icoExit = $('icoExit');
 const curEl = $('cur'), totEl = $('tot'), track = $('track'), rail = $('rail');
 const played = $('played'), knob = $('knob'), tip = $('tip');
@@ -23,57 +24,104 @@ const fmt = (ms) => {
 
 let state = null;
 let dragging = false;
-let playlist = [];
-let playlistIndex = 0;
 
 // --- mostrar/ocultar la barra (lo decide el proceso principal: sigue al ratón) ---
-function setVisible(v) { body.classList.toggle('hidden', !v); }
+// visibleBar se usa para NO repintar la barra 10 veces por segundo mientras
+// está oculta (el interval de pintado sigue vivo, pero no toca el DOM).
+let visibleBar = true;
+function setVisible(v) { visibleBar = !!v; body.classList.toggle('hidden', !v); if (visibleBar) paintProgress(); }
 cmp.onOverlay && cmp.onOverlay((o) => setVisible(!!o.visible));
 document.addEventListener('mousemove', () => { cmp.overlayHover && cmp.overlayHover(); });
 
-// --- lista de reproducción (hardcodeada en el proceso principal) -------------
-function renderPlaylist() {
+// --- Listas reales del usuario (Favoritos, Ver más tarde y las propias) ------
+// Antes aquí se pintaba la lista hardcodeada del proceso principal. Ahora el
+// panel muestra las listas guardadas de verdad (almacén local de Ciudadan).
+let listsCache = [];
+let openListId = null;
+
+function plRow(title, sub, onClick, current) {
+  const row = document.createElement('div');
+  row.className = 'plItem' + (current ? ' current' : '');
+  row.title = title || '';
+  const n = document.createElement('div');
+  n.className = 'n';
+  n.textContent = '';
+  const t = document.createElement('div');
+  t.className = 't';
+  const b = document.createElement('b');
+  b.textContent = title || '';
+  const s = document.createElement('span');
+  s.textContent = sub || '';
+  t.appendChild(b); t.appendChild(s);
+  row.appendChild(n); row.appendChild(t);
+  row.onclick = onClick;
+  return row;
+}
+
+async function renderLists() {
   plList.innerHTML = '';
-  if (!playlist.length) {
+  try {
+    const res = await cmp.lists();
+    listsCache = (res && res.lists) || [];
+  } catch (e) { listsCache = []; }
+  if (!listsCache.length) {
     const empty = document.createElement('div');
     empty.id = 'plEmpty';
-    empty.textContent = 'La lista está vacía';
+    empty.textContent = 'Todavía no hay listas. Añade vídeos desde Buscar.';
     plList.appendChild(empty);
     return;
   }
-  playlist.forEach((item, i) => {
-    const row = document.createElement('div');
-    row.className = 'plItem' + (i === playlistIndex ? ' current' : '');
-    row.dataset.index = String(i);
-    row.title = item.title;
-    const n = document.createElement('div');
-    n.className = 'n';
-    n.textContent = String(i + 1);
-    const t = document.createElement('div');
-    t.className = 't';
-    const b = document.createElement('b');
-    b.textContent = item.title;
-    const s = document.createElement('span');
-    s.textContent = item.author || item.url;
-    t.appendChild(b); t.appendChild(s);
-    row.appendChild(n); row.appendChild(t);
-    row.onclick = async (e) => {
-      e.stopPropagation();
-      playlistIndex = i;
-      markCurrent();
-      await cmp.playIndex(i);
-    };
-    plList.appendChild(row);
-  });
+  for (const l of listsCache) {
+    const count = Number(l.count) || 0;
+    plList.appendChild(plRow(l.name, count + (count === 1 ? ' vídeo' : ' vídeos'), async () => {
+      openListId = l.id;
+      plTitle.textContent = l.name;
+      plBack.style.display = 'inline-flex';
+      await renderListItems(l.id);
+    }));
+  }
 }
-function markCurrent() {
-  [...plList.querySelectorAll('.plItem')].forEach((el, i) => {
-    el.classList.toggle('current', i === playlistIndex);
-  });
+
+async function renderListItems(id) {
+  plList.innerHTML = '';
+  try {
+    const l = await cmp.list(id);
+    const items = (l && l.items) || [];
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.id = 'plEmpty';
+      empty.textContent = 'Esta lista está vacía.';
+      plList.appendChild(empty);
+      return;
+    }
+    items.forEach((item, i) => {
+      plList.appendChild(plRow(item.title || item.id, item.channel || '', async () => {
+        await cmp.playMedia(item);
+      }, false));
+    });
+  } catch (e) {
+    const empty = document.createElement('div');
+    empty.id = 'plEmpty';
+    empty.textContent = 'No se pudo abrir la lista.';
+    plList.appendChild(empty);
+  }
 }
+
+plBack.onclick = async (e) => {
+  e.stopPropagation();
+  openListId = null;
+  plTitle.textContent = 'Mis listas';
+  plBack.style.display = 'none';
+  await renderLists();
+};
+
+// La lista de reproducción heredada (hardcodeada) se conserva como respaldo
+// del botón "siguiente/anterior" cuando no hay cola ni listas reales.
+let playlist = [];
+let playlistIndex = 0;
 (async () => {
   const pl = await cmp.playlist();
-  if (pl && pl.items) { playlist = pl.items; playlistIndex = pl.index || 0; renderPlaylist(); }
+  if (pl && pl.items) { playlist = pl.items; playlistIndex = pl.index || 0; }
 })();
 
 // --- Explorador multimedia (buscador + resultados + cola + listas) ---------
@@ -102,7 +150,17 @@ function closeModal() {
   if (ex && ex.close) ex.close();
 }
 searchBtn.onclick = (e) => { e.stopPropagation(); openModal(); };
-plToggle.onclick = (e) => { e.stopPropagation(); body.classList.toggle('showPlaylist'); };
+plToggle.onclick = async (e) => {
+  e.stopPropagation();
+  const abrir = !body.classList.contains('showPlaylist');
+  body.classList.toggle('showPlaylist', abrir);
+  if (abrir) {
+    openListId = null;
+    plTitle.textContent = 'Mis listas';
+    plBack.style.display = 'none';
+    await renderLists();
+  }
+};
 plClose.onclick = (e) => { e.stopPropagation(); body.classList.remove('showPlaylist'); };
 // El explorador crea su propio #modalCancel; nos encargamos de cerrar el modal.
 document.addEventListener('click', (e) => {
@@ -192,32 +250,50 @@ window.addEventListener('keydown', async (e) => {
 });
 
 // --- reflejo del estado real del motor ---
+// El motor notifica el estado ~1 vez por segundo (sondear más rápido saturaba
+// libVLC y congelaba la app). El reloj de la barra se avanza EN LOCAL entre
+// notificaciones, así que la barra sigue siendo suave sin llamar al motor.
+let stateAt = Date.now();
 cmp.onUpdate((s) => {
   window.__cmpUpdates = (window.__cmpUpdates || 0) + 1;
   try { render(s); } catch (e) { window.__cmpError = String(e && e.message || e); }
 });
 
+function currentTime() {
+  if (!state) return 0;
+  const base = state.time || 0;
+  if (!state.isPlaying) return base;
+  const max = state.length || 0;
+  const t = base + (Date.now() - stateAt);
+  return max ? Math.min(max, t) : t;
+}
+
+function paintProgress() {
+  // Se pinta SIEMPRE (también con la barra oculta): son 3 escrituras de estilo
+  // cada 100 ms y así el DOM refleja el estado real en cuanto se lea.
+  const t = currentTime();
+  const len = (state && state.length) || 0;
+  const pct = len > 0 ? Math.max(0, Math.min(1, t / len)) : 0;
+  curEl.textContent = fmt(t);
+  played.style.width = (pct * 100) + '%';
+  knob.style.left = (pct * 100) + '%';
+}
+setInterval(paintProgress, 100);
+
 function render(s) {
   state = s;
+  stateAt = Date.now();
   const playing = !!s.isPlaying;
   icoPlay.style.display = playing ? 'none' : 'block';
   icoPause.style.display = playing ? 'block' : 'none';
-  curEl.textContent = fmt(s.time);
   totEl.textContent = fmt(s.length);
-  const len = s.length || 0;
-  const pct = len > 0 ? Math.max(0, Math.min(1, s.time / len)) : 0;
-  played.style.width = (pct * 100) + '%';
-  knob.style.left = (pct * 100) + '%';
+  paintProgress();
   if (document.activeElement !== volEl) volEl.value = s.muted ? 0 : s.volume;
   icoVol.style.display = s.muted ? 'none' : 'block';
   icoMute.style.display = s.muted ? 'block' : 'none';
   icoFull.style.display = s.fullscreen ? 'none' : 'block';
   icoExit.style.display = s.fullscreen ? 'block' : 'none';
   body.classList.toggle('buffering', s.status === 'buffering' || s.status === 'opening');
-  if (typeof s.playlistIndex === 'number' && s.playlistIndex !== playlistIndex) {
-    playlistIndex = s.playlistIndex;
-    markCurrent();
-  }
 }
 
 (async () => { state = await cmp.state(); })();

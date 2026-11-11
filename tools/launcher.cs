@@ -12,7 +12,8 @@ internal static class Launcher
     [STAThread]
     private static int Main()
     {
-        string root = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string here = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string root = ResolveAppRoot(here);
         string electron = Path.Combine(root, "node_modules", "electron", "dist", "electron.exe");
 
         if (!File.Exists(electron))
@@ -63,6 +64,25 @@ internal static class Launcher
             return 1;
         }
         return 0;
+    }
+
+    // El lanzador puede vivir fuera de la carpeta de la app (por ejemplo en
+    // %LOCALAPPDATA%\CiudadanMediaPlayer). En ese caso, un fichero
+    // "app-root.txt" junto al lanzador indica dónde está el proyecto. Si no
+    // existe, se usa la propia carpeta del lanzador.
+    private static string ResolveAppRoot(string here)
+    {
+        try
+        {
+            string marker = Path.Combine(here, "app-root.txt");
+            if (File.Exists(marker))
+            {
+                string txt = File.ReadAllText(marker).Trim();
+                if (txt.Length > 0 && Directory.Exists(txt)) return txt;
+            }
+        }
+        catch { }
+        return here;
     }
 
     private static void MessageBoxError(string text)

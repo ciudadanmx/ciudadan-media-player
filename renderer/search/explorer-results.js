@@ -10,6 +10,8 @@
   const R = {};
 
   // --- tarjeta de resultado -------------------------------------------------
+  // Clic en la tarjeta = reproducir directamente. Debajo hay acciones rápidas
+  // (cola, favoritos, ver más tarde) y el botón "más" con el resto.
   R.card = function (item, app) {
     const card = U.el('div', { class: 'ex-card', 'data-id': item.id });
     const thumb = U.el('div', { class: 'ex-thumb' });
@@ -37,12 +39,27 @@
     if (item.description) meta.appendChild(U.el('div', { class: 'ex-desc', text: item.description }));
     card.appendChild(meta);
 
-    const more = U.el('button', { class: 'ex-more-btn', type: 'button', title: 'Más acciones', 'data-id': item.id });
-    more.appendChild(U.icon('queue'));
+    // --- fila de acciones rápidas -------------------------------------------
+    const acts = U.el('div', { class: 'ex-actions' });
+    const quick = (action, icon, label, title) => {
+      const b = U.el('button', { class: 'ex-act', type: 'button', title: title || label, 'data-action': action, 'data-id': item.id });
+      b.appendChild(U.icon(icon));
+      b.appendChild(U.el('span', { text: label }));
+      b.addEventListener('click', (e) => { e.stopPropagation(); app.onAction(action, item); });
+      return b;
+    };
+    acts.appendChild(quick('add-queue', 'queue', 'Cola', 'Agregar a la cola'));
+    acts.appendChild(quick('favorite', 'star', 'Favoritos', 'Guardar en Favoritos'));
+    acts.appendChild(quick('watch-later', 'clock', 'Más tarde', 'Guardar en Ver más tarde'));
+    const more = U.el('button', { class: 'ex-act ex-more-btn', type: 'button', title: 'Más acciones', 'data-id': item.id });
+    more.appendChild(U.icon('more'));
+    more.appendChild(U.el('span', { text: 'Más' }));
     more.addEventListener('click', (e) => { e.stopPropagation(); app.openMenu(item, more); });
-    card.appendChild(more);
+    acts.appendChild(more);
+    card.appendChild(acts);
 
-    card.addEventListener('click', () => app.openDetails(item));
+    // Clic en la tarjeta = reproducir ahora.
+    card.addEventListener('click', () => app.playItem(item));
     return card;
   };
 
@@ -55,6 +72,7 @@
     { action: 'save-list', icon: 'list', label: 'Guardar en lista' },
     { action: 'favorite', icon: 'star', label: 'Favoritos' },
     { action: 'copy-link', icon: 'copy', label: 'Compartir' },
+    { action: 'details', icon: 'info', label: 'Ver detalles' },
   ];
 
   R.menu = function (item, anchor, app) {

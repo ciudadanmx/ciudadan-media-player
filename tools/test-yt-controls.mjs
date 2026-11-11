@@ -108,7 +108,9 @@ async function main() {
   check('la app arranca con el API', true, 'puerto ' + API_PORT);
 
   let st = null;
-  for (let i = 0; i < 60; i++) { st = await apiState(); if (st && st.status === 'playing') break; await sleep(1000); }
+  // El motor puede tardar: libVLC escanea sus 363 plugins y el antivirus los
+  // analiza (la app ya está abierta y el API responde mientras tanto).
+  for (let i = 0; i < 240; i++) { st = await apiState(); if (st && st.status === 'playing') break; await sleep(1000); }
   check('reproduciendo', !!(st && st.status === 'playing'), st ? st.status : 'sin estado');
 
   const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
@@ -173,30 +175,39 @@ async function main() {
   check('7. el botón stop detiene la reproducción', stopped === 'stopped' || stopped === 'idle', stopped);
 
   // 8) siguiente / anterior de la lista
+  // La cola persistente tiene prioridad sobre la lista fija: para comprobar el
+  // comportamiento de la lista se vacía la cola primero.
+  await apiCmd('clearQueue');
+  await sleep(500);
   const urlBefore = (await apiState())?.url;
   await cdpEval(`document.getElementById('next').click()`);
   await sleep(1500);
   let playing = false;
-  for (let i = 0; i < 60; i++) { const s = await apiState(); if (s && s.status === 'playing') { playing = true; break; } await sleep(1000); }
+  for (let i = 0; i < 120; i++) { const s = await apiState(); if (s && s.status === 'playing') { playing = true; break; } await sleep(1000); }
   const urlNext = (await apiState())?.url;
   check('8. el botón siguiente carga otro elemento de la lista', playing && urlNext !== urlBefore, urlBefore + ' -> ' + urlNext);
   await cdpEval(`document.getElementById('prev').click()`);
   let urlPrev = null;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 120; i++) {
     await sleep(1000);
     const s = await apiState();
     if (s && s.url === urlBefore) { urlPrev = s.url; break; }
   }
   check('8b. el botón anterior vuelve al elemento anterior', urlPrev === urlBefore, urlNext + ' -> ' + urlPrev);
 
-  // 9) lista lateral con scroll
-  const pl = await cdpEval(`(()=>{document.getElementById('plToggle').click();
+  // 9) panel lateral con las listas REALES del usuario (no la lista fija)
+  const pl = await cdpEval(`(async()=>{document.getElementById('plToggle').click();
+    await new Promise(r=>setTimeout(r,1500));
     const l=document.getElementById('plList');
+    const nombres=[...l.querySelectorAll('.plItem b')].map(e=>e.textContent);
     return {open:document.body.classList.contains('showPlaylist'),items:l.querySelectorAll('.plItem').length,
             scrollH:l.scrollHeight,clientH:l.clientHeight,overflow:getComputedStyle(l).overflowY,
-            primero:(l.querySelector('.plItem b')||{}).textContent||''};})()`);
-  check('9. la lista se abre con elementos hardcodeados', !!pl && pl.open && pl.items >= 5, pl ? JSON.stringify(pl) : '');
-  check('9b. la lista tiene scroll (contenido más alto que el panel)', !!pl && pl.scrollH > pl.clientH && pl.overflow === 'auto', pl ? `scrollH=${pl.scrollH} clientH=${pl.clientH} overflow=${pl.overflow}` : '');
+            titulo:(document.getElementById('plTitle')||{}).textContent||'', nombres};})()`);
+  check('9. el panel muestra las listas reales del usuario', !!pl && pl.open && pl.items >= 2 &&
+    pl.nombres.includes('Favoritos') && pl.nombres.includes('Ver más tarde'),
+    pl ? JSON.stringify(pl.nombres) : '');
+  check('9b. el panel de listas es navegable', !!pl && pl.titulo === 'Mis listas' && pl.overflow === 'auto',
+    pl ? `titulo=${pl.titulo} overflow=${pl.overflow} items=${pl.items}` : '');
   await cdpEval(`document.getElementById('plClose').click()`);
 
   // 10) modal de búsqueda

@@ -12,6 +12,7 @@
 //   se bloquea y la reproducción actual no se congela.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SearchProvider } from './provider.js';
@@ -80,12 +81,15 @@ function runYtdlp(args, { timeoutMs = 30000, signal = null } = {}) {
     }
     const killer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
     child.on('error', (e) => { clearTimeout(killer); cleanup(); reject(e); });
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
       clearTimeout(killer);
       if (signal) signal.removeEventListener('abort', onAbort);
+      // Lectura ASÍNCRONA: el antivirus analiza los ficheros recién creados en
+      // el primer acceso y, con readFileSync, ese análisis congelaba la
+      // interfaz durante toda la búsqueda.
       let out = '', err = '';
-      try { out = fs.readFileSync(outFile, 'utf8'); } catch {}
-      try { err = fs.readFileSync(errFile, 'utf8'); } catch {}
+      try { out = await fsp.readFile(outFile, 'utf8'); } catch {}
+      try { err = await fsp.readFile(errFile, 'utf8'); } catch {}
       cleanup();
       if (killed) return reject(new Error(timedOut ? `tiempo de espera agotado (${Math.round(timeoutMs / 1000)} s)` : 'búsqueda cancelada'));
       if (code !== 0 || !out.trim()) {

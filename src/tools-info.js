@@ -3,6 +3,7 @@
 // escribe su salida en un FDT de archivo real y se lee después.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TOOLS } from './paths.js';
@@ -23,11 +24,13 @@ function runTool(cmd, args, { timeoutMs = 20000, take = 1 } = {}) {
       const child = spawn(cmd, args, { stdio: ['ignore', outFd, errFd], windowsHide: true });
       const killer = setTimeout(() => { try { child.kill(); } catch {} }, timeoutMs);
       child.on('error', (e) => { clearTimeout(killer); try { fs.closeSync(outFd); fs.closeSync(errFd); } catch {} resolve({ ok: false, error: String(e.message || e) }); });
-      child.on('close', (code) => {
+      child.on('close', async (code) => {
         clearTimeout(killer);
         try { fs.closeSync(outFd); fs.closeSync(errFd); } catch {}
-        const text = (() => { try { return fs.readFileSync(outFile, 'utf8'); } catch { return ''; } })();
-        const err = (() => { try { return fs.readFileSync(outFile + '.err', 'utf8'); } catch { return ''; } })();
+        // Lectura ASÍNCRONA: el antivirus analiza los ficheros recién creados
+        // en el primer acceso; con readFileSync bloqueaba el hilo principal.
+        const text = await fsp.readFile(outFile, 'utf8').catch(() => '');
+        const err = await fsp.readFile(outFile + '.err', 'utf8').catch(() => '');
         const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
         resolve({ ok: code === 0, code, value: lines.slice(0, take).join(' | '), error: err.slice(-200) });
       });

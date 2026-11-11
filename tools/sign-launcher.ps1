@@ -3,9 +3,19 @@
 # "almacen protegido" que bloquea la ejecucion.
 $ErrorActionPreference = 'Continue'
 $root = 'C:\yii\ciudadan-media-player'
-$exe = Join-Path $root 'CiudadanMediaPlayer.exe'
+# El lanzador vive FUERA de la carpeta del proyecto: en esa ruta Windows lo marcaba
+# como "adjunto" (Attachment Manager) y mostraba el aviso "Advertencia de seguridad
+# de Abrir archivo" al abrirlo, aunque estuviera firmado y sin Mark of the Web.
+# En %LOCALAPPDATA% (ruta nunca "adjunta") arranca limpio.
+$launcherDir = Join-Path $env:LOCALAPPDATA 'CiudadanMediaPlayer'
+$exe = Join-Path $launcherDir 'CiudadanMediaPlayer.exe'
 $cer = Join-Path $env:TEMP 'ciudadan-media-player-code-signing.cer'
 $subject = 'CN=Ciudadan Media Player'
+
+if (-not (Test-Path $launcherDir)) { New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null }
+if (-not (Test-Path (Join-Path $launcherDir 'app-root.txt'))) {
+  Set-Content -Path (Join-Path $launcherDir 'app-root.txt') -Value $root -Encoding ASCII -NoNewline
+}
 
 Write-Output '--- 1) mark of the web ---'
 foreach ($f in @($exe, (Join-Path $root 'assets\favicon-ciudadan-morado-transparente.ico'))) {

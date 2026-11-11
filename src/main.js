@@ -37,11 +37,33 @@ const STORE_FILE = path.join(DATA_DIR, 'ciudadan-media-store.json');
 fs.mkdirSync(LOG_DIR, { recursive: true });
 const LOG_FILE = path.join(LOG_DIR, 'app.log');
 fs.writeFileSync(path.join(LOG_DIR, 'main-ran.txt'), 'main.js ejecutado pid=' + process.pid + ' argv=' + JSON.stringify(process.argv) + '\n');
-// Log sincrónico: si la app termina abruptamente, no se pierde nada.
+// Log con ESCRITURA EN BUFFER: escribir en disco de forma sincrónica en cada
+// línea bloqueaba el hilo principal (y el antivirus analizaba el fichero en
+// cada escritura: cientos de ms por línea). Ahora se acumula y se vuelca cada
+// 500 ms; al salir se descarga de forma sincrónica para no perder nada.
+// El stdout (redirigido a un fichero por el lanzador) también se limita: es
+// otra escritura sincrónica.
+const logBuf = [];
+let logFlushTimer = null;
+let consoleCount = 0;
+let consoleWindowStart = Date.now();
+function flushLog(sync = false) {
+  if (!logBuf.length) return;
+  const data = logBuf.join('');
+  logBuf.length = 0;
+  try {
+    if (sync) fs.appendFileSync(LOG_FILE, data);
+    else fs.appendFile(LOG_FILE, data, () => {});
+  } catch {}
+}
 const log = (...a) => {
   const line = new Date().toISOString() + ' ' + a.join(' ');
-  try { console.log(line); } catch {}
-  try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
+  logBuf.push(line + '\n');
+  if (logBuf.length > 2000) logBuf.splice(0, logBuf.length - 1000);
+  if (!logFlushTimer) logFlushTimer = setTimeout(() => { logFlushTimer = null; flushLog(false); }, 500);
+  const now = Date.now();
+  if (now - consoleWindowStart > 1000) { consoleWindowStart = now; consoleCount = 0; }
+  if (consoleCount < 5) { consoleCount++; try { console.log(line); } catch {} }
 };
 
 // Modo auto-test: electron . --auto-test   (URL y duración por variables de entorno)
@@ -106,6 +128,7 @@ function videoContentBounds() {
 
 function watchCursor() {
   setInterval(() => {
+    const t0 = Date.now();
     if (!winOverlay || winOverlay.isDestroyed() || !winVideo || winVideo.isDestroyed()) return;
     const p = readCursor();
     if (!p) return;
@@ -116,6 +139,8 @@ function watchCursor() {
     if (inside && moved) showOverlay();
     else if (!inside && Date.now() - overlayLastMove > 600) hideOverlay();
     else if (inside && Date.now() - overlayLastMove > OVERLAY_IDLE_MS) hideOverlay();
+    const ms = Date.now() - t0;
+    if (ms > 120) log('CURSOR LENTO: ' + ms + ' ms');
   }, 150);
 }
 
@@ -124,6 +149,9 @@ function createWindows() {
     width: 960, height: 570, minWidth: 480, minHeight: 300,
     backgroundColor: '#000000', title: 'Ciudadan Media Player',
     icon: APP_ICON,
+    // El menú (Archivo, Editar, Vista...) queda oculto y sólo aparece al
+    // pulsar Alt, como en los reproductores nativos.
+    autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
@@ -137,7 +165,14 @@ function createWindows() {
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
   });
   winOverlay.loadFile(path.join(ROOT, 'renderer', 'yt-controls.html'));
-  winOverlay.once('ready-to-show', () => { try { winOverlay.show(); } catch {} positionOverlay(); });
+  winOverlay.once('ready-to-show', () => {
+    try { winOverlay.show(); } catch {}
+    // La barra es un overlay del vídeo: no debe aparecer como ventana aparte en
+    // la barra de tareas (mismo título e icono -> se agrupa con la principal).
+    try { winOverlay.setSkipTaskbar(true); } catch {}
+    try { winOverlay.setMenuBarVisibility(false); } catch {}
+    positionOverlay();
+  });
 
   positionOverlay();
   watchCursor();
@@ -209,8 +244,8 @@ function positionOverlay() {
   } catch {}
 }
 
-function sendUpdate() {
-  const s = getState();
+function sendUpdate(snap = null) {
+  const s = snap || getState();
   if (winOverlay && !winOverlay.isDestroyed()) winOverlay.webContents.send('cmp:update', s);
 }
 
@@ -220,7 +255,7 @@ function getState() {
   const pl = { playlistIndex: currentPlaylistIndex, playlistLength: PLAYLIST.length };
   if (!vlc || !vlc.player) {
     return {
-      playerId: PLAYER_ID, state: 0, stateName: 'Idle', status: 'idle',
+      playerId: PLAYER_ID, state: 0, stateName: 'Idle', status: engineReady ? 'idle' : 'preparing',
       time: 0, length: 0, position: 0, duration: 0,
       volume: lastVolume, muted: lastMute, isPlaying: false, ended: false,
       seekable: false, fullscreen: fs,
@@ -247,8 +282,10 @@ function getState() {
 }
 
 // Estado con la forma del contrato de control (segundos, no milisegundos).
-function apiState() {
-  const s = getState();
+function apiState() { return apiStateFrom(getState()); }
+// Variante que reutiliza una lectura ya hecha del motor (evita llamadas FFI
+// duplicadas en cada ciclo de sondeo).
+function apiStateFrom(s) {
   return {
     playerId: PLAYER_ID,
     status: s.status,
@@ -290,13 +327,50 @@ let stateVersion = 0;
 let lastVolume = 100;
 let lastMute = false;
 let lastStatus = 'idle';
+// último evento del motor registrado en el log (para no repetir ráfagas)
+let lastEventName = '';
+let lastEventAt = 0;
 let switchingMedia = false; // true mientras se cambia de medio (los errores del medio viejo son previstos)
+// true cuando el usuario ha pedido parar: la vigilancia no debe "recuperar"
+// ese medio (sería reiniciar un vídeo que el usuario ha parado a propósito).
+let intentionalStop = false;
+// true cuando el usuario ha pedido pausa: un stream muerto deja el motor en
+// "paused" y, sin esta marca, la vigilancia no podría distinguirlo de una
+// pausa pedida a propósito (y el vídeo se quedaría en negro sin recuperarse).
+let intentionalPause = false;
+// true cuando libVLC ya está listo para reproducir.
+let engineReady = false;
+// Promesa resuelta cuando el motor termina de arrancar.
+let engineReadyPromise = null;
+let resolveEngineReady = null;
 const recentEvents = [];
 
 // Carga (o recarga) de una URL de YouTube: resuelve con yt-dlp y arranca libVLC.
+// Se ejecuta EN SERIE: si dos cargas llegan a la vez (API + botón + autoavance),
+// libVLC recibiría dos cambios de medio cruzados y el motor quedaría
+// inconsistente (vídeo en negro o estado incoherente). La cadena nunca se
+// rompe: un fallo en una carga no bloquea las siguientes.
+let loadChain = Promise.resolve();
 async function loadUrl(url, origin = 'user') {
+  const task = loadChain.then(() => loadUrlInner(url, origin), () => loadUrlInner(url, origin));
+  loadChain = task.then(() => {}, () => {});
+  return task;
+}
+
+async function loadUrlInner(url, origin = 'user') {
   try {
     log('load:', url);
+    intentionalStop = false;   // una carga nueva siempre es intencionada
+    intentionalPause = false;
+    // Si el motor todavía se está preparando (arranque en segundo plano), se
+    // espera a que esté listo en vez de fallar.
+    if (!engineReady && engineReadyPromise) {
+      const ok = await Promise.race([
+        engineReadyPromise,
+        new Promise((r) => setTimeout(() => r(false), 180000)),
+      ]);
+      if (!ok) throw new Error('el motor de reproducción no está disponible');
+    }
     const entry = await resolveYouTube(url);
     currentTitle = entry.title; currentMode = entry.mode; currentError = entry.errors?.join('; ') || null; currentId = entry.id;
     currentUrl = url;
@@ -324,7 +398,9 @@ async function loadUrl(url, origin = 'user') {
     // medio viejo, que son provocados por nosotros.
     switchingMedia = true;
     try { proxy.abortAll(); } catch {}
-    vlc.play(streamUrl, { hwnd: hwndBuf, mediaOptions: [':network-caching=1200'] });
+    // vlc.play() es asíncrono: no bloquea el hilo principal aunque stop()/
+    // play() tarden dentro de libVLC (antes esto congelaba toda la app).
+    await vlc.play(streamUrl, { hwnd: hwndBuf, mediaOptions: [':network-caching=1200'] });
     switchingMedia = false;
     // lastStatus lo actualiza scheduleEngineSync() cuando el motor confirme.
     const st = notifyChange(origin, 'load');
@@ -364,9 +440,13 @@ function notifyChange(origin = 'system', reason = '', extra = {}) {
 let engineSyncTimer = null;
 function scheduleEngineSync() {
   if (engineSyncTimer) clearTimeout(engineSyncTimer);
-  engineSyncTimer = setTimeout(() => {
+  engineSyncTimer = setTimeout(async () => {
     engineSyncTimer = null;
     if (!vlc || !vlc.player) return;
+    // Se relee el estado REAL del motor (no la caché): la caché se refresca en
+    // el sondeo de 1 s y aquí puede estar obsoleta y perderse la transición
+    // (p.ej. el "ended" que dispara el autoavance de la cola).
+    try { await vlc.sync(); } catch {}
     const st = vlc.getState();
     const status = statusOf(st);
     if (status === lastStatus) return; // sin cambio real: no se duplica el evento
@@ -399,7 +479,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, timeoutMs = 1500, stepMs = 100) {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
-    try { if (fn()) return true; } catch {}
+    try { const r = fn(); if (r && typeof r.then === 'function') { if (await r) return true; } else if (r) return true; } catch {}
     await sleep(stepMs);
   }
   return false;
@@ -412,9 +492,12 @@ const toNum = (v, def) => { const n = Number(v); return Number.isFinite(n) ? n :
 // Sólo se conservan los campos con dato real (nada inventado).
 function normalizeMediaItem(raw) {
   const it = raw && typeof raw === 'object' ? raw : {};
-  const id = String(it.id || it.videoId || '').trim();
+  let id = String(it.id || it.videoId || '').trim();
+  const rawUrl = String(it.url || '').trim();
+  // Si llega una URL de YouTube sin id, se extrae el id canónico del enlace.
+  if (!id && rawUrl) id = videoIdOf(rawUrl) || '';
   if (!id) throw new Error('vídeo sin id');
-  const url = String(it.url || '').trim() || `https://www.youtube.com/watch?v=${id}`;
+  const url = rawUrl || `https://www.youtube.com/watch?v=${id}`;
   const out = { id, url, title: it.title || null };
   if (it.channel) out.channel = it.channel;
   if (it.duration !== undefined && it.duration !== null) out.duration = Number(it.duration) || null;
@@ -439,7 +522,7 @@ async function playMediaItem(item, origin = 'user') {
 async function applyVolume(value, origin) {
   if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
   const target = clamp(Math.round(toNum(value, lastVolume)), 0, 100);
-  const rc = vlc.setVolume(target);
+  const rc = await vlc.setVolume(target);
   if (rc !== 0) throw new Error('libVLC rechazo el volumen (rc=' + rc + ')');
   const real = vlc.getVolume();
   lastVolume = real;
@@ -450,7 +533,7 @@ async function applyVolume(value, origin) {
 
 async function applyMute(on, origin) {
   if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
-  const rc = vlc.setMute(!!on);
+  const rc = await vlc.setMute(!!on);
   if (rc !== 0) throw new Error('libVLC rechazo el mute (rc=' + rc + ')');
   const real = vlc.getMute();
   lastMute = real;
@@ -465,31 +548,58 @@ async function applySeek(seconds, origin, reason = 'seek') {
   let t = toNum(seconds, NaN);
   if (!Number.isFinite(t) || t < 0) throw new Error('posicion invalida: ' + seconds);
   if (len > 0) t = Math.min(t, len / 1000);
-  vlc.setTime(Math.round(t * 1000));
-  const ok = await waitFor(() => Math.abs(vlc.getTime() / 1000 - t) < 2.5, 3000, 150);
+  await vlc.setTime(Math.round(t * 1000));
+  // Se espera a que el motor confirme la nueva posición (con refresco asíncrono).
+  const ok = await waitFor(async () => { await vlc.sync(); return Math.abs(vlc.getTime() / 1000 - t) < 2.5; }, 4000, 150);
   const st = notifyChange(origin, reason);
   emitEvent('positionChanged', { position: vlc.getTime() / 1000, duration: len / 1000, state: st }, origin);
   if (!ok) throw new Error('el motor no confirmo la posicion ' + t + 's (pos actual ' + (vlc.getTime() / 1000).toFixed(1) + 's)');
   return { result: { position: vlc.getTime() / 1000, requested: t }, state: st };
 }
 
+// Órdenes que cambian el medio. Se ejecutan EN SERIE (una detrás de otra):
+// si dos "load"/"next" llegan a la vez, libVLC recibiría dos cambios de medio
+// cruzados y el motor se queda inconsistente (vídeo en negro o estado
+// incoherente). El resto de órdenes (volumen, pausa, seek) pueden coexistir.
+const MEDIA_COMMANDS = new Set(['load', 'reload', 'next', 'previous', 'playList', 'playQueueIndex', 'stop']);
+let mediaChain = Promise.resolve();
+function serializeMedia(fn) {
+  const next = mediaChain.then(fn, fn);
+  // La cadena nunca se rompe: un fallo en una orden no bloquea las siguientes.
+  mediaChain = next.then(() => {}, () => {});
+  return next;
+}
+
 async function executeCommand(command, args = {}, origin = 'api') {
+  if (MEDIA_COMMANDS.has(command)) {
+    return serializeMedia(() => executeCommandInner(command, args, origin));
+  }
+  return executeCommandInner(command, args, origin);
+}
+
+async function executeCommandInner(command, args = {}, origin = 'api') {
   const a = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {};
   const curVolume = () => (vlc && vlc.player ? vlc.getVolume() : lastVolume);
   const curTime = () => (vlc && vlc.player ? vlc.getTime() / 1000 : 0);
+  // Espera a una condición del motor refrescando la caché de forma asíncrona.
+  const waitState = (pred, ms) => waitFor(async () => { await vlc.sync(); return pred(); }, ms);
 
   switch (command) {
     case 'play': {
       if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
+      intentionalStop = false;   // el usuario vuelve a reproducir: la vigilancia vuelve a estar activa
+      intentionalPause = false;
       const st0 = vlc.getState();
       if (st0 === 4) {
         // Reanudar: set_pause(0) es idempotente y no reinicia el medio.
-        vlc.setPaused(false);
-        const ok = await waitFor(() => vlc.getState() === 3, 2500);
+        await vlc.setPaused(false);
+        const ok = await waitState(() => vlc.getState() === 3, 2500);
         if (!ok) throw new Error('el motor no confirmo la reanudacion');
       } else {
-        const rc = vlc.api.libvlc_media_player_play(vlc.player);
+        // Reanudar un medio parado: la llamada es asíncrona para no bloquear.
+        const rc = await vlc.resume();
         if (rc !== 0) throw new Error('libVLC rechazo la reproduccion (rc=' + rc + ')');
+        await waitState(() => vlc.getState() === 3, 2500);
       }
       // Los eventos playback* los emite scheduleEngineSync() a partir del estado
       // REAL del motor: aqui solo se confirma la orden y se notifica el cambio.
@@ -498,16 +608,18 @@ async function executeCommand(command, args = {}, origin = 'api') {
     }
     case 'pause': {
       if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
-      vlc.setPaused(true);
-      const ok = await waitFor(() => vlc.getState() === 4, 2000);
+      intentionalPause = true;   // pausa pedida por el usuario: no recuperar
+      await vlc.setPaused(true);
+      const ok = await waitState(() => vlc.getState() === 4, 2000);
       if (!ok) throw new Error('el motor no confirmo la pausa');
       const st = notifyChange(origin, 'pause');
       return { result: { paused: true }, state: st };
     }
     case 'stop': {
       if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
-      vlc.stop();
-      const ok = await waitFor(() => vlc.getState() === 5 || vlc.getTime() === 0, 2500);
+      intentionalStop = true;   // el usuario paró: la vigilancia no debe recargar
+      await vlc.stop();
+      const ok = await waitState(() => vlc.getState() === 5 || vlc.getTime() === 0, 2500);
       if (!ok) throw new Error('el motor no confirmo el stop');
       const st = notifyChange(origin, 'stop');
       return { result: { stopped: true }, state: st };
@@ -873,7 +985,7 @@ async function autoTest() {
   }, 2000);
   // a mitad, probar seek y volumen
   await new Promise(r => setTimeout(r, Math.max(5000, AUTO_SECS * 500)));
-  try { vlc.setTime(120000); } catch {}
+  try { await vlc.setTime(120000); } catch {}
   await new Promise(r => setTimeout(r, 4000));
   const sSeek = getState();
   seekOk = Math.abs(sSeek.time - 120000) < 8000 && sSeek.time > 0;
@@ -1033,30 +1145,12 @@ app.whenReady().then(async () => {
   log('app ready');
   log('userData:', app.getPath('userData'));
   if (process.env.CMP_ELECTRON_NO_SANDBOX === '1') app.commandLine.appendSwitch('no-sandbox');
-  try {
-    proxy = new StreamProxy();
-    const port = await proxy.listen();
-    log('proxy en 127.0.0.1:' + port);
-    vlc = new VlcPlayer({ onEvent: (e) => {
-      log('evento:', e.name);
-      // Los eventos del motor llegan de forma asíncrona y a veces desordenada
-      // (p.ej. 'Paused' después de 'Playing'). Por eso NO se traducen 1:1:
-      // se relee el estado REAL de libVLC y se emite sólo la transición.
-      scheduleEngineSync();
-      if (e.name === 'EncounteredError') {
-        // Durante un cambio de medio el error del medio anterior es previsto
-        // (lo causamos nosotros al cortar el stream): no se reporta.
-        if (!switchingMedia) currentError = 'error de reproduccion en libVLC';
-      }
-      // Modo HOLD (capturas de evidencia): al terminar, vuelve a empezar el medio.
-      if (e.name === 'EndReached' && process.env.CMP_HOLD === '1') {
-        setTimeout(() => { try { vlc?.setTime(0); vlc?.api.libvlc_media_player_play(vlc.player); log('HOLD: medio reiniciado'); } catch (err) { log('HOLD: no se pudo reiniciar', String(err)); } }, 600);
-      }
-    } });
-    log('libVLC listo');
-  } catch (e) {
-    log('ERROR init:', (e && e.stack) || String(e));
-  }
+
+  // ORDEN IMPORTANTE: primero las ventanas, después el motor.
+  // libVLC puede tardar mucho en arrancar (escanea los 366 plugins y a veces
+  // Windows/Defender lo ralentiza hasta 2 minutos). Si se esperaba aquí, la
+  // app no aparecía y parecía congelada. Ahora la ventana sale AL INSTANTE y el
+  // motor se inicializa en segundo plano.
   try {
     createWindows();
     log('ventanas creadas');
@@ -1064,20 +1158,30 @@ app.whenReady().then(async () => {
     log('ERROR createWindows:', (e && e.stack) || String(e));
   }
   setupIpc();
-  setInterval(sendUpdate, 500);
-  // Tick de posición: el coordinador recibe posición/duración sin tener que
-  // preguntar (y con número de versión para descartar respuestas viejas).
+  engineReady = false;
+  engineReadyPromise = new Promise((r) => { resolveEngineReady = r; });
+
+  // --- Watchdog del hilo principal -------------------------------------------
+  // Mide el retardo del bucle de eventos. Si el hilo principal se bloquea (una
+  // llamada FFI síncrona, un spawn, un DWM...), la app se queda "congelada" y
+  // aquí queda registrado exactamente cuánto tiempo y en qué momento.
+  let lastTick = Date.now();
+  let stalls = 0;
   setInterval(() => {
-    if (!vlc || !vlc.player) return;
-    const st = vlc.getState();
-    if (st !== 3) return; // sólo mientras reproduce
-    stateVersion++;
-    emitEvent('positionChanged', {
-      position: vlc.getTime() / 1000, duration: vlc.getLength() / 1000,
-      state: apiState(),
-    }, 'system');
+    const now = Date.now();
+    const lag = now - lastTick - 1000;
+    lastTick = now;
+    if (lag > 400) {
+      stalls++;
+      log('ATASCO: hilo principal bloqueado ' + lag + ' ms (acumulados: ' + stalls + ')');
+      if (stalls === 1 || stalls % 10 === 0) {
+        try { emitEvent('playerError', { error: 'hilo principal bloqueado ' + lag + ' ms', kind: 'stall' }, 'system'); } catch {}
+      }
+    }
   }, 1000);
-  // API de control local para el coordinador Node.js.
+
+  // API de control local para el coordinador Node.js (arranca ya: el estado
+  // refleja que el motor todavía se está preparando).
   try {
     api = new ControlApi({
       playerId: PLAYER_ID,
@@ -1093,6 +1197,40 @@ app.whenReady().then(async () => {
     log('ERROR API de control:', (e && e.stack) || String(e));
     api = null;
   }
+  // Un ÚNICO ciclo de sondeo (antes había dos: uno a 500 ms y otro a 1 s, cada
+  // uno con varias llamadas FFI a libVLC; eso saturaba el hilo principal y la
+  // app se trababa). Ahora:
+  //   * se lee el estado UNA vez por ciclo,
+  //   * mientras libVLC está en una operación (cambio de medio) se usan los
+  //     valores cacheados (vlc.busy) y no se toca el motor,
+  //   * la posición se notifica por el mismo ciclo.
+  setInterval(() => {
+    if (!vlc || !vlc.player) return;
+    // La lectura del motor es ASÍNCRONA: no bloquea el hilo principal (antes
+    // una llamada FFI síncrona congelaba la app entera varios segundos).
+    const t0 = Date.now();
+    vlc.sync().then((last) => {
+      const syncMs = Date.now() - t0;
+      // Si el sondeo ve una transición que ningún evento ha reflejado todavía
+      // (evento perdido), se programa la sincronización de eventos.
+      try { if (statusOf(vlc.getState()) !== lastStatus) scheduleEngineSync(); } catch {}
+      const snap = getState();               // una sola lectura (desde caché)
+      if (snap.status === 'playing') {
+        stateVersion++;
+        emitEvent('positionChanged', {
+          position: (snap.time || 0) / 1000, duration: (snap.length || 0) / 1000,
+          state: apiStateFrom(snap),
+        }, 'system');
+      }
+      const tSend = Date.now();
+      sendUpdate(snap);
+      const sendMs = Date.now() - tSend;
+      // Diagnóstico: cualquier fase lenta del sondeo se registra con su coste.
+      if (syncMs > 150 || sendMs > 150) {
+        log('SONDEO LENTO: sync=' + syncMs + ' ms, envio=' + sendMs + ' ms, estado=' + snap.status);
+      }
+    }).catch(() => {});
+  }, 1000);
   winVideo?.webContents.on('did-finish-load', () => {
     if (winVideo && !winVideo.isDestroyed() && vlc) {
       // asignar HWND tras cargar (el handle ya existe; lo seteamos en play())
@@ -1100,15 +1238,105 @@ app.whenReady().then(async () => {
     }
   });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindows(); });
+
+  // --- motor en segundo plano ----------------------------------------------
+  // La interfaz ya está visible: aquí se prepara el proxy y libVLC. Si libVLC
+  // tarda (escaneo de plugins), la app sigue respondiendo y lo avisa.
+  (async () => {
+    try {
+      proxy = new StreamProxy({ onLog: (m) => log(m) });
+      const port = await proxy.listen();
+      log('proxy en 127.0.0.1:' + port);
+    } catch (e) {
+      log('ERROR proxy:', (e && e.stack) || String(e));
+      proxy = null;
+    }
+    try {
+      const t0 = Date.now();
+      vlc = await VlcPlayer.create({ onTiming: (t) => {
+        log('tiempos de carga (ms): media=' + t.media + ' player=' + t.player + ' play=' + t.play + ' total=' + t.total);
+      }, onEvent: (e) => {
+        // libVLC repite a veces el mismo evento en ráfaga (p.ej. 20 "Playing"
+        // en 100 ms). Se registra en el log sólo si cambió respecto al último
+        // (o pasaron más de 2 s): el log crecía sin control y cada línea es E/S.
+        const now = Date.now();
+        if (e.name !== lastEventName || now - lastEventAt > 2000) {
+          lastEventName = e.name; lastEventAt = now;
+          log('evento:', e.name);
+        }
+        // Los eventos del motor llegan de forma asíncrona y a veces desordenada
+        // (p.ej. 'Paused' después de 'Playing'). Por eso NO se traducen 1:1:
+        // se relee el estado REAL de libVLC y se emite sólo la transición.
+        scheduleEngineSync();
+        if (e.name === 'EncounteredError') {
+          // Durante un cambio de medio el error del medio anterior es previsto
+          // (lo causamos nosotros al cortar el stream): no se reporta.
+          if (!switchingMedia) currentError = 'error de reproduccion en libVLC';
+        }
+        // Modo HOLD (capturas de evidencia): al terminar, vuelve a empezar el medio.
+        if (e.name === 'EndReached' && process.env.CMP_HOLD === '1') {
+          setTimeout(() => { try { vlc?.setTime(0); vlc?.api.libvlc_media_player_play(vlc.player); log('HOLD: medio reiniciado'); } catch (err) { log('HOLD: no se pudo reiniciar', String(err)); } }, 600);
+        }
+      } });
+      log('libVLC listo en ' + Math.round((Date.now() - t0) / 1000) + ' s');
+      engineReady = true;
+      try { resolveEngineReady?.(true); } catch {}
+      notifyChange('system', 'engine-ready');
+      sendUpdate();
+      // Si el modo de prueba pidió un vídeo, se carga ahora que el motor está.
+      if (process.argv.includes('--api-test')) {
+        try {
+          const r = await loadUrl(AUTO_URL, 'system');
+          log('API-TEST:', r && r.ok ? 'cargado ' + r.title : 'error ' + JSON.stringify(r));
+        } catch (e) { log('API-TEST error:', (e && e.stack) || String(e)); }
+      }
+    } catch (e) {
+      log('ERROR init:', (e && e.stack) || String(e));
+      currentError = 'no se pudo iniciar el motor de reproducción';
+      try { resolveEngineReady?.(false); } catch {}
+      notifyChange('system', 'engine-error');
+    }
+  })();
+
+  // Vigilancia del medio: si la posición no avanza durante 20 s en un estado
+  // que debería estar avanzando, el stream está cortado o el vout ha muerto
+  // (la ventana se queda en negro). Se distingue lo que el usuario pidió:
+  //   - estado 3 (playing) sin avanzar  -> siempre se recupera
+  //   - estado 4 (paused) sin avanzar   -> sólo si NO fue una pausa pedida
+  //   - estado 5 (stopped) / 7 (error)  -> sólo si NO fue un stop pedido
+  // El 6 (ended) lo gestiona el autoavance de la cola y no se toca.
+  // Al recuperarse se recarga la URL actual (las URLs de YouTube caducan,
+  // así que además hay que volver a resolver con yt-dlp).
+  let lastProgressAt = Date.now();
+  let lastProgressPos = -1;
+  let lastRecoveryAt = 0;
+  const recover = (why) => {
+    if (Date.now() - lastRecoveryAt < 60000) return;   // no repetir en bucle
+    if (!currentUrl || intentionalStop || switchingMedia) return;
+    lastRecoveryAt = Date.now();
+    lastProgressAt = Date.now();
+    lastProgressPos = -1;
+    log('MEDIO COLGADO (' + why + '): se recarga ' + currentUrl);
+    try { emitEvent('playerError', { error: 'medio colgado (' + why + '), se recarga', kind: 'stall' }, 'system'); } catch {}
+    loadUrl(currentUrl, 'system').catch((e) => log('ERROR recuperacion:', String(e && e.message || e)));
+  };
+  setInterval(() => {
+    if (!vlc || !vlc.player || !engineReady) return;
+    const st = vlc.getState();
+    const pos = vlc.getTime();
+    if (pos !== lastProgressPos) { lastProgressPos = pos; lastProgressAt = Date.now(); }
+    const quiet = Date.now() - lastProgressAt;
+    if (quiet < 20000) return;
+    let why = null;
+    if (st === 3) why = 'reproduciendo sin avanzar';
+    else if (st === 4 && !intentionalPause) why = 'pausado sin avanzar (stream muerto)';
+    else if ((st === 5 || st === 7) && !intentionalStop) why = 'estado ' + st;
+    if (!why) { lastProgressAt = Date.now(); return; }  // pausa/stop pedidos: no recuperar
+    recover(why);
+  }, 5000);
+
   if (AUTO_TEST) setTimeout(() => autoTest().catch(e => { log('ERROR autoTest:', (e && e.stack) || String(e)); app.exit(4); }), 1500);
   if (process.argv.includes('--ui-test')) setTimeout(() => uiTest().catch(e => { log('ERROR uiTest:', (e && e.stack) || String(e)); app.exit(6); }), 1500);
-  // Modo para las pruebas del API de control: carga el vídeo y se queda vivo.
-  if (process.argv.includes('--api-test')) setTimeout(async () => {
-    try {
-      const r = await loadUrl(AUTO_URL, 'system');
-      log('API-TEST:', r && r.ok ? 'cargado ' + r.title : 'error ' + JSON.stringify(r));
-    } catch (e) { log('API-TEST error:', (e && e.stack) || String(e)); }
-  }, 1500);
 });
 
 app.on('window-all-closed', () => {
@@ -1124,5 +1352,7 @@ app.on('will-quit', () => {
   try { api?.stop(); } catch {}
   try { vlc?.dispose(); } catch {}
   try { proxy?.close(); } catch {}
+  try { store?.flush(true); } catch {}
   log('will-quit');
+  flushLog(true);   // volcado sincrónico final: no se pierde nada del log
 });

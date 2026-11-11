@@ -4,6 +4,7 @@
 // Esto funciona igual dentro y fuera del sandbox.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -43,13 +44,18 @@ function runYtdlpJson(videoUrl, client, timeoutMs = 90000) {
     }
     const killer = setTimeout(() => { try { child.kill(); } catch {} reject(new Error(`yt-dlp timeout (${client})`)); }, timeoutMs);
     child.on('error', (e) => { clearTimeout(killer); reject(e); });
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
       clearTimeout(killer);
       fs.closeSync(outFd); fs.closeSync(errFd);
+      // La lectura del JSON es ASÍNCRONA: el fichero es recién creado y el
+      // antivirus lo analiza en el primer acceso; con readFileSync ese análisis
+      // bloquea el hilo principal de Electron (la app se quedaba "congelada"
+      // durante la carga). Con fs/promises el análisis ocurre en el hilo del
+      // pool y la interfaz sigue respondiendo.
       try {
-        const out = fs.readFileSync(tmp, 'utf8');
-        const err = fs.readFileSync(tmp + '.err', 'utf8');
-        fs.rmSync(path.dirname(tmp), { recursive: true, force: true });
+        const out = await fsp.readFile(tmp, 'utf8');
+        const err = await fsp.readFile(tmp + '.err', 'utf8').catch(() => '');
+        await fsp.rm(path.dirname(tmp), { recursive: true, force: true }).catch(() => {});
         if (code !== 0 || !out.trim()) {
           const msg = (err || '').trim().split('\n').slice(-3).join(' | ');
           return reject(new Error(`yt-dlp[${client}] exit=${code}: ${msg}`));

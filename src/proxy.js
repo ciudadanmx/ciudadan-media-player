@@ -9,11 +9,19 @@ import { TOOLS } from './paths.js';
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer']);
 
 export class StreamProxy {
-  constructor() {
+  constructor(opts = {}) {
     this.entries = new Map(); // id -> { url, headers, title, duration, mode, formatId, resolution, client, resolvedAt, hits, bytes }
     this.active = new Map();  // id -> Set<{res, ac}>  (streams vivos, para poder cortarlos)
     this.server = http.createServer((req, res) => this.#onRequest(req, res));
     this.port = 0;
+    this.onLog = opts.onLog || (() => {});
+    // Tope de entradas guardadas: el Map crecía sin límite (cada carga o
+    // recarga de un vídeo añadía una) y consumía memoria sin necesidad.
+    this.maxEntries = opts.maxEntries || 60;
+    // Si el upstream deja de enviar datos durante este tiempo, se corta el
+    // stream: una conexión colgada deja a libVLC esperando y el vídeo se
+    // queda en negro sin error visible.
+    this.stallTimeoutMs = opts.stallTimeoutMs || 30000;
   }
 
   async listen() {
@@ -65,6 +73,14 @@ export class StreamProxy {
   }
 
   register(entry) {
+    // LRU sencillo: si se supera el tope, se descarta la entrada más antigua.
+    while (this.entries.size >= this.maxEntries) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.abortEntry(oldest);
+      this.entries.delete(oldest);
+      this.onLog('proxy: entrada descartada por tope de memoria: ' + oldest);
+    }
     this.entries.set(entry.id, { ...entry, resolvedAt: Date.now(), hits: 0, bytes: 0 });
     return entry.id;
   }
@@ -93,6 +109,7 @@ export class StreamProxy {
         const upstream = await fetch(entry.url, { headers, redirect: 'follow', signal: ac.signal });
         if (!upstream.ok && upstream.status !== 206) {
           const body = await upstream.text().catch(() => '');
+          this.onLog('proxy: upstream ' + upstream.status + ' para ' + id + ': ' + body.slice(0, 120));
           res.writeHead(upstream.status, { 'content-type': 'text/plain' });
           res.end(`upstream ${upstream.status}: ${body.slice(0, 300)}`);
           return;
@@ -106,12 +123,34 @@ export class StreamProxy {
         }
         res.writeHead(upstream.status, outHeaders);
         const reader = Readable.fromWeb(upstream.body);
-        reader.on('data', (c) => { entry.bytes = (entry.bytes || 0) + c.length; });
-        reader.on('error', () => { try { res.destroy(); } catch {} });
-        res.on('close', () => { try { reader.destroy(); } catch {} });
+        // Vigilancia con ventana rodante: si el upstream deja de mandar datos
+        // durante stallTimeoutMs, se corta para que libVLC reciba un error y
+        // pueda reintentarse (si no, el vídeo se queda congelado/en negro).
+        let stallTimer = null;
+        const armStall = () => {
+          if (stallTimer) clearTimeout(stallTimer);
+          stallTimer = setTimeout(() => {
+            this.onLog('proxy: stream sin datos durante ' + this.stallTimeoutMs + ' ms, se corta (' + id + ')');
+            try { ac.abort(); } catch {}
+            try { reader.destroy(); } catch {}
+            try { res.destroy(); } catch {}
+          }, this.stallTimeoutMs);
+        };
+        reader.on('data', (c) => { entry.bytes = (entry.bytes || 0) + c.length; armStall(); });
+        reader.on('error', (e) => {
+          if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+          this.onLog('proxy: error del stream ' + id + ': ' + (e && e.message || e));
+          try { res.destroy(); } catch {}
+        });
+        res.on('close', () => {
+          if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }  // el cliente cerró: no es un stall
+          try { reader.destroy(); } catch {}
+        });
+        armStall();
         reader.pipe(res);
       } catch (e) {
         if (ac.signal.aborted) return; // el cliente cerró (seek/pausa): no es error
+        this.onLog('proxy: fallo al servir ' + id + ': ' + (e && e.message || e));
         if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
         res.end('proxy error: ' + (e.message || e));
       }

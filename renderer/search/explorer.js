@@ -167,24 +167,16 @@
       U.clear(grid);
       more.textContent = '';
 
-      // URL pegada: se resuelve ese vídeo (no hay búsqueda de texto).
+      // URL pegada: se reproduce directamente ese vídeo (sin mostrar resultados).
       if (U.isYoutubeUrl(q)) {
         setStatus('loading', 'Resolviendo el vídeo…');
         const id = U.videoIdOf(q);
+        let item = { id: id || q, url: q, provider: 'ytdlp', title: '' };
         try {
           const res = await cmp.searchDetails(id || q);
-          if (!res || !res.ok || !res.item) {
-            setStatus('error', 'No se pudo resolver ese enlace.');
-            return;
-          }
-          state.items = [res.item];
-          state.hasMore = false;
-          renderResults();
-          setStatus(null);
-          input.value = '';
-        } catch (e) {
-          setStatus('error', 'Error al resolver: ' + String((e && e.message) || e));
-        }
+          if (res && res.ok && res.item) item = res.item;
+        } catch (e) { /* se reproduce igualmente con la URL */ }
+        await playItem(item);
         return;
       }
 
@@ -289,15 +281,11 @@
       closeMenu();
       try {
         if (action === 'play-now') {
-          say('Cargando…');
-          const r = await cmp.playMedia(item);
-          if (r && r.ok) {
-            say('Reproduciendo: ' + (item.title || item.id));
-            await refreshQueue();
-            if (o.autoCloseOnPlay !== false) close();
-          } else {
-            say('No se pudo reproducir: ' + String((r && r.error) || 'error'));
-          }
+          await playItem(item);
+          return;
+        }
+        if (action === 'details') {
+          Res.details(item, app);
           return;
         }
         if (action === 'add-queue') {
@@ -381,6 +369,25 @@
       menu.style.top = Math.max(6, host.height / 2 - r.height / 2) + 'px';
     }
 
+    // Reproduce un resultado (clic en la tarjeta o "Reproducir ahora").
+    async function playItem(item) {
+      say('Cargando…');
+      try {
+        const r = await cmp.playMedia(item);
+        if (r && r.ok) {
+          say('Reproduciendo: ' + (item.title || item.id));
+          await refreshQueue();
+          if (o.autoCloseOnPlay !== false) close();
+        } else {
+          say('No se pudo reproducir: ' + String((r && r.error) || 'error'));
+        }
+        return r;
+      } catch (e) {
+        say('No se pudo reproducir: ' + String((e && e.message) || e));
+        return null;
+      }
+    }
+
     // --------------------------------------------------------- cola y listas
     async function refreshQueue() {
       try {
@@ -447,7 +454,7 @@
       playQueue(index) { cmp.queuePlay(index).then(refreshQueue).catch((e) => say('Error: ' + e.message)); },
       removeQueue(index) { cmp.queueRemove(index).then(refreshQueue).catch((e) => say('Error: ' + e.message)); },
       moveQueue(from, to) { cmp.queueMove(from, to).then(refreshQueue).catch((e) => say('Error: ' + e.message)); },
-      playItem(item) { onAction('play-now', item); },
+      playItem(item) { playItem(item); },
       addToQueue(item, pos) { cmp.queueAdd(item, pos || 'end').then(refreshQueue).then(() => say('Añadido a la cola')).catch((e) => say('Error: ' + e.message)); },
       removeFromList(listId, itemId) { cmp.listRemove(listId, itemId).then(refreshLists).catch((e) => say('Error: ' + e.message)); },
       moveInList(listId, from, to) { cmp.listMove(listId, from, to).then(() => selectList(listId)).catch((e) => say('Error: ' + e.message)); },

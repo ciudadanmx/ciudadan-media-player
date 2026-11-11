@@ -25,14 +25,19 @@ libVLC 3.0.23 (koffi/FFI)  →  libvlc_media_player_set_hwnd()  →  HWND de la 
   Clic en el vídeo = play/pausa · doble clic = pantalla completa.
 - **No hay segunda ventana de controles**: todo vive en la barra flotante (la ventana inferior
   se eliminó porque se solapaba con la barra de título y no se cerraba con la app).
-- **Lista de reproducción hardcodeada** (`src/playlist.js`, 8 vídeos verificados) en un panel
-  lateral **con scroll**; los botones ⏮/⏭ recorren la lista y el elemento actual queda resaltado.
-  Si no hay nada cargado, **play carga el elemento actual de la lista**.
+- **Panel lateral con las listas REALES del usuario** (Favoritos, Ver más tarde y las que crees):
+  se abre desde el botón *lista* de la barra y permite abrir una lista y reproducir sus vídeos.
+  La lista fija de 8 vídeos (`src/playlist.js`) se conserva **sólo como respaldo** de los botones
+  ⏮/⏭ cuando no hay cola ni elementos reales.
 - **Botón de buscar (lupa)**: abre el **explorador multimedia** (`renderer/search/explorer.js`):
   buscador de YouTube con resultados reales, ficha de detalle, menú contextual por vídeo
   (reproducir, cola, reproducir a continuación, ver más tarde, guardar en lista, favoritos,
   compartir), **cola de reproducción** con arrastrar y soltar y **listas personales**
   persistentes. El componente es reutilizable tal cual en la futura página de inicio.
+  - **Clic en una tarjeta = reproducir directamente** (ya no abre la ficha).
+  - **Debajo de cada tarjeta**: *Cola*, *Favoritos*, *Más tarde* y *Más* (el resto de acciones).
+  - **Pegar una URL válida de YouTube en el buscador carga y reproduce ese vídeo directamente**
+    (no muestra una lista de resultados).
 - **Cola y listas persistentes** (`src/store.js` + `src/queue.js`, un único JSON en `data/`):
   cola real (añadir, quitar, reordenar, vaciar, actual, autoavance al terminar) y listas
   (crear, renombrar, borrar, añadir/quitar/reordenar vídeos, reproducir, volcar a la cola),
@@ -40,11 +45,22 @@ libVLC 3.0.23 (koffi/FFI)  →  libvlc_media_player_set_hwnd()  →  HWND de la 
   (no son las "Me gusta" de una cuenta de YouTube) y no tocan las colas del TTS.
 - **Control desde Node.js**: API local autenticada en `127.0.0.1` con estado real del motor y eventos
   SSE (ver §6). El reproductor **no** decide ducking ni prioridades: sólo ejecuta y informa.
+- **Volumen siempre a la vista y real**: al crear el reproductor se fija el volumen pedido (100 por
+  defecto) con `libvlc_audio_set_volume`, y el sondeo **relee el volumen real del motor** cada
+  segundo (la interfaz nunca muestra un valor optimista que difiera del que suena).
 - Acceso directo del Escritorio: `Ciudadan Media Player - YouTube (libVLC).lnk` → lanzador firmado
-  `CiudadanMediaPlayer.exe` (icono morado embebido; **no** dispara el aviso de SmartScreen/Defender).
+  `%LOCALAPPDATA%\CiudadanMediaPlayer\CiudadanMediaPlayer.exe` (icono morado embebido).
+  El lanzador **vive fuera de la carpeta del proyecto** porque Windows marcaba esa ruta como
+  "adjunta" (Attachment Manager) y mostraba el aviso *"Advertencia de seguridad de Abrir archivo"*
+  aunque el binario estuviera firmado y sin Mark of the Web; en `%LOCALAPPDATA%` (ruta nunca
+  adjunta) arranca limpio. Junto al lanzador hay un `app-root.txt` con la ruta del proyecto.
   La ruta de arranque completa está firmada: lanzador **y** `node_modules/electron/dist/electron.exe`
   (Electron distribuye sus binarios sin firmar) con el certificado local, que está en
   `CurrentUser\Root` y `CurrentUser\TrustedPublisher` (`tools/sign-launcher.ps1`).
+- **Una sola ventana en la barra de tareas**: la ventana de vídeo (`winVideo`) es la única con
+  entrada en la barra de tareas; la barra flotante usa `setSkipTaskbar(true)` y comparte título con
+  la ventana principal (se agrupan). El menú de la ventana (`File`, `Edit`, …) **sólo aparece al
+  pulsar Alt** (`autoHideMenuBar: true`).
 - **Recarga de URL** (`↻ Recargar`): vuelve a resolver la URL con yt-dlp — necesario porque las URLs
   de YouTube caducan (~6 h) y están ligadas a la IP.
 - **Atajos de teclado**: espacio = play/pausa · ←/→ = ±10 s (Shift ±60 s) · ↑/↓ = volumen ±5 ·
@@ -71,7 +87,9 @@ Proyecto: `C:\yii\ciudadan-media-player`
 | `src/preload.cjs` | Puente `contextBridge` (`cmp.load/play/pause/stop/seek/setVolume/state/onUpdate`) |
 | `src/resolver.js` | yt-dlp → URL directa + cabeceras; fallback a modo *pipe* |
 | `src/proxy.js` | Proxy HTTP 127.0.0.1 con reenvío de `Range` (modo *range*) y modo *pipe* (`yt-dlp -o -`) |
-| `src/vlc.js` | Enlace koffi a libVLC: `play/pause/stop/setTime/setVolume/getState` + eventos |
+| `src/vlc.js` | Enlace koffi a libVLC: `play/pause/stop/setTime/setVolume/getState` + eventos (FFI **asíncrono**, nunca bloquea el hilo principal) |
+| `src/vlc-instance.js` | Crea la instancia de libVLC **fuera del hilo principal** (worker) para que la app no se congele al arrancar |
+| `src/vlc-instance-worker.js` | Worker: precalienta los plugins de VLC (el antivirus no los analiza durante el escaneo) y crea la instancia |
 | `src/paths.js` | Resolución de rutas (VLC portable win64, herramientas) |
 | `src/tools-info.js` | Diagnóstico en vivo de yt-dlp / FFmpeg / Deno (mismo patrón de FDs que el resolver) |
 | `src/control-api.js` | API local de control para el coordinador: HTTP en `127.0.0.1` + token + SSE de eventos |
@@ -85,7 +103,7 @@ Proyecto: `C:\yii\ciudadan-media-player`
 | `renderer/search/explorer-results.js` | Tarjetas de resultados, menú contextual por vídeo y ficha de detalle |
 | `renderer/search/explorer-lists.js` | Cola y listas personales (con arrastrar y soltar para reordenar) |
 | `renderer/search/explorer.js` | Explorador multimedia: buscador, pestañas, filtros, acciones y conexión con el motor (módulo reutilizable) |
-| `CiudadanMediaPlayer.exe` | Lanzador firmado (icono embebido) que abre la app; es el destino del acceso directo del Escritorio |
+| `CiudadanMediaPlayer.exe` | (movido) El lanzador firmado ahora vive en `%LOCALAPPDATA%\CiudadanMediaPlayer\` con un `app-root.txt`: en la carpeta del proyecto Windows lo marcaba como "adjunto" y mostraba el aviso de seguridad |
 | `tools/launcher.cs`, `tools/sign-launcher.ps1` | Código fuente del lanzador y script que lo firma con el certificado local |
 | `tools/test-control-api.mjs` | 25 comprobaciones de aceptación del API de control (las 12 del contrato) |
 | `tools/test-yt-controls.mjs` | 25 comprobaciones de la barra estilo YouTube (overlay, área de contenido, auto-ocultado, clic, stop, anterior/siguiente, lista con scroll, modal, seek, vista previa, captura) |
@@ -173,9 +191,10 @@ powershell -ExecutionPolicy Bypass -File tools\capture-evidence.ps1
 | 5 | `node tools\test-videos.mjs` (6 videos) | **6/6 PASS** — Big Buck Bunny, Me at the zoo (2005), Sintel, Tears of Steel, Rick Astley, Desert (4K). Todos con `modo=range`, `client=android`, `itag 18`, reproducción real, seek correcto y 1.0–27.0 MB transmitidos |
 | 6 | Modo *pipe* (fallback `yt-dlp -o -`, con `CMP_FORCE_PIPE=1`) | **PASS** — reprodujo 12.6 s y transmitió 18.3 MB por stdout; sin seek (no hay `Range`), esperado |
 | 7 | Salida limpia del proceso | `exit=0` en auto-test y UI-test (tras `vlc.stop()` + `vlc.dispose({safe:true})` antes de `app.exit()`) |
-| 8 | **API de control** (`node tools\test-control-api.mjs`) | **25/25 PASS** — estado real del motor, pausa/play por API, volumen externo→slider y slider→volumen externo (vía CDP sobre la interfaz real), forward/rewind, barra de progreso sincronizada, eventos SSE (`stateChanged`, `volumeChanged`, `playbackStarted/Paused`, `positionChanged`), órdenes simultáneas, comando desconocido → 400, volumen fuera de rango → 100, posición negativa → error, id repetido no reejecuta, cierre/reapertura sin conexiones huérfanas, reconexión sin perder sincronía y TTS/DSH intactos (hashes de `AGENTS.md` sin cambios + DSH web accesible) |
-| 9 | **Barra estilo YouTube** (`node tools\test-yt-controls.mjs`) | **25/25 PASS** — la ventana superpuesta existe y ya **no hay ventana de controles aparte**; cubre sólo el área de contenido (944×505) y **deja libre la barra de título**; refleja el estado real (tiempo `0:01 / 10:34`, progreso, icono de pausa, 22 actualizaciones); **se auto-oculta a los 3 s**; clic en el vídeo = play/pausa; **stop** → `stopped`; **siguiente/anterior** cargan el elemento correspondiente de la lista (`aqz-KE-bpKQ ↔ jNQXAC9IVRw`); **lista con scroll** (8 elementos, `scrollHeight 384 > clientHeight 312`, `overflow-y: auto`); **modal de búsqueda** con el foco en el campo; seek con la barra (1,7 s → 382,2 s) y vista previa del tiempo (`5:17`) |
+| 8 | **API de control** (`node tools\test-control-api.mjs`) | **25/25 PASS** — estado real del motor, pausa/play por API, volumen externo→slider y slider→volumen externo (vía CDP sobre la interfaz real), forward/rewind, barra de progreso sincronizada, eventos SSE (`stateChanged`, `volumeChanged`, `playbackStarted/Paused`, `positionChanged`), órdenes simultáneas, comando desconocido → 400, volumen fuera de rango → 100, posición negativa → error, id repetido no reejecuta, cierre/reapertura sin conexiones huérfanas, reconexión sin perder sincronía y TTS/DSH intactos (hashes de `AGENTS.md` sin cambios + DSH web accesible). **Latencia del API medida en soak: p50 17–18 ms, p95 24–43 ms, máx 612 ms** |
+| 9 | **Barra estilo YouTube** (`node tools\test-yt-controls.mjs`) | **25/25 PASS** — la ventana superpuesta existe y ya **no hay ventana de controles aparte**; cubre sólo el área de contenido (944×531) y **deja libre la barra de título**; refleja el estado real (tiempo `0:03 / 10:34`, progreso, icono de pausa, 7 actualizaciones); **se auto-oculta a los 3 s**; clic en el vídeo = play/pausa; **stop** → `stopped`; **siguiente/anterior** cargan el elemento correspondiente (`aqz-KE-bpKQ ↔ jNQXAC9IVRw`); el **panel lateral muestra las listas reales** (`Favoritos`, `Ver más tarde`) y es navegable; **modal de búsqueda** con el foco en el campo; seek con la barra (1,7 s → 381,4 s) y vista previa del tiempo (`5:17`) |
 | 10 | Render real **con la barra superpuesta** (`tools\capture-evidence.ps1`) | **RENDER CONFIRMADO** — ventana de vídeo: 95,2 % de píxeles no negros, 13 305 colores distintos, **85,1 % de píxeles cambian en 3 s**; el vídeo se ve a través de la ventana transparente de la barra. Capturas de la interfaz: `logs\ui-bar.png`, `logs\ui-lista.png`, `logs\ui-modal.png` (via CDP, `tools\capture-ui-overlay.ps1`) |
+| 10b | **Prueba de resistencia** (`node tools\soak.mjs 10`) | **OK** — 10 min reproduciendo con sondeo del API cada 2 s (294 muestras): **0 bloqueos, 0 incoherencias, 0 errores**; latencia p50 17 ms / p95 43 ms / máx 612 ms; acciones (pause/play/seek/forward/rewind/volumen) en 16–185 ms. Tras eliminar la E/S síncrona, el watchdog del hilo principal no registra ningún atasco > 400 ms. El proxy corta un stream muerto a los 30 s y la vigilancia recarga el medio automáticamente |
 | 11 | **Barra de título utilizable** (`tools\check-titlebar.ps1`) | **PASS** — la barra flotante empieza **57 px por debajo** del borde superior de la ventana de vídeo (deja libre el marco del sistema) y `WindowFromPoint` sobre la barra de título devuelve la **ventana de vídeo**, no la overlay: los clics de minimizar/cerrar/mover llegan al sistema |
 | 12 | **Clic real de ratón** en la barra (`tools\click-bar.ps1`) | **PASS** — el ratón se mueve al botón *play* calculado vía CDP (DOM 62,464 → pantalla 195,561) y el clic real cambia el motor de `playing` → `paused` |
 | 13 | Icono del Escritorio (`tools\check-desktop-icon.ps1` + `tools\icon-diff.ps1`) | **PASS** — Explorer resuelve el icono del `.lnk` (32×32, centro RGB 38,0,82, esquina transparente) y **lo dibuja en el Escritorio**: al ocultar el acceso directo (`attrib +h`) cambian 1 568 px en x=250–294, y=498–542, con colores de la gama Ciudadan (RGB 55,2,103 / 148,26,224) |
@@ -243,11 +262,14 @@ UI-TEST: Stop -> estado=Stopped stopOk=true
 | Crash `0xC0000005` en `libvlc_media_player_stop()/release()` con vídeos cortos (p. ej. "Me at the zoo", 19 s) | libVLC destruye el vout mientras el player sigue activo; el `stop`/`release` native no es recuperable desde JS | `dispose({safe:true})` no libera el player activo; en la suite headless cada video corre en un proceso hijo y termina sin liberar (el sistema operativo recupera los recursos) |
 | `libvlc_media_player_stop()` se queda **bloqueado** (llamada FFI síncrona) | stop nativo puede no retornar con el vout `dummy` | nunca se llama `stop()` en estado `EndReached`; entre videos se deja que `play()` cambie el media (`libvlc_media_player_set_media`) en vez de liberar/recrear el player |
 | `EPERM` al hacer `spawn` de yt-dlp con `stdio:'pipe'` | named pipes bloqueados en el sandbox | yt-dlp escribe a FDs de archivo real (`fs.openSync`) y se lee después |
-| Windows SmartScreen/Defender avisaba de "aplicación no reconocida" al abrir el acceso directo | el aviso "**Advertencia de seguridad de Abrir archivo**" lo dispara el *Attachment Manager* cuando el binario conserva el estado "adjunto" (no depende del *Mark of the Web*: verificado que el `.exe` no lo tiene) | acceso directo → **lanzador firmado** `CiudadanMediaPlayer.exe` (certificado local en `CurrentUser\Root` y `CurrentUser\TrustedPublisher`, `Get-AuthenticodeSignature` = `Valid`) + **`electron.exe` también firmado** (Electron lo distribuye sin firmar y es el binario real de la ruta de arranque). Diagnóstico: el aviso depende del *fichero*, no del contenido (una copia con el mismo nombre y bytes arrancaba sin aviso) → el fichero se reescribe con una copia limpia (paso 6 de `tools/sign-launcher.ps1`) para que el sistema lo trate como local. Verificado sin diálogos y con la app en marcha |
+| Windows SmartScreen/Defender avisaba de "aplicación no reconocida" al abrir el acceso directo | el aviso "**Advertencia de seguridad de Abrir archivo**" lo dispara el *Attachment Manager* cuando el binario conserva el estado "adjunto" (no depende del *Mark of the Web*: verificado que el `.exe` no lo tiene). Medido: **el mismo binario byte a byte** en `C:\yii\ciudadan-media-player\` se queda bloqueado con el aviso y en `%LOCALAPPDATA%\CiudadanMediaPlayer\` arranca limpio | el lanzador se **mueve a `%LOCALAPPDATA%\CiudadanMediaPlayer\`** (con `app-root.txt` → ruta del proyecto) y el acceso directo apunta allí. Además: lanzador **y** `electron.exe` firmados (Electron los distribuye sin firmar) con el certificado local en `CurrentUser\Root` y `CurrentUser\TrustedPublisher` (`Get-AuthenticodeSignature` = `Valid`) + reescritura con copia limpia (paso 6 de `tools/sign-launcher.ps1`). **Verificado**: la app arranca desde el acceso directo sin diálogos y el API queda vivo |
 | El icono del acceso directo "no se veía" | Explorer ignora `IconLocation` si apunta a otro `.exe` y/o conserva la caché de iconos obsoleta del `.lnk` | `IconLocation` → `CiudadanMediaPlayer.exe,0` (icono embebido), `ie4uinit -ClearIconCache` + `-show`, y **verificación objetiva**: `SHGetFileInfo` devuelve el morado (38,0,82) y la diferencia de capturas con el acceso directo oculto demuestra que Explorer lo dibuja (1.568 px, x=250–294, y=498–542) |
 | La app se cerraba al reanudar tras una pausa | `libvlc_media_player_pause()` **alterna** el estado y `play()` sobre un medio pausado reinicia el medio (ráfaga de eventos y caída nativa) | se usa `libvlc_media_player_set_pause()` (idempotente): reanudar = `set_pause(0)`, pausar = `set_pause(1)`, y se espera la confirmación del motor antes de responder |
 | El API de control no arrancaba al reiniciar la app deprisa | el puerto lo tenía todavía la instancia anterior y `this.port` se comprobaba **antes** de asignarlo | `ControlApi.start()` reintenta el puerto con espera (12 intentos) y asigna `this.port` sólo cuando el servidor escucha de verdad |
 | Los eventos del motor llegaban desordenados (`playbackPaused` después de `playbackStarted`) | libVLC postea los eventos de forma asíncrona | `scheduleEngineSync()` relee el estado **real** de libVLC y sólo emite si hay transición: sin eventos duplicados ni contradictorios |
+| **La app se quedaba "congelada" (la UI no respondía y el API tardaba segundos)** | causa raíz medida: lecturas/escrituras **síncronas** de ficheros recién creados (`fs.readFileSync` del JSON de yt-dlp en el resolver y el buscador, `writeFileSync` del almacén al tocar la cola, `appendFileSync` del log en cada evento) — el antivirus analiza cada fichero nuevo en el primer acceso y esa E/S bloqueaba el hilo principal de Electron | todo pasado a **asíncrono** (`fs/promises`, escrituras del almacén encadenadas, log en buffer con volcado cada 500 ms y volcado síncrono al salir). Resultado medido (soak de 8 min, 237 muestras): latencia del API **p50 18 ms / p95 24 ms / máx 42 ms** (antes p95 615 ms, máx 2267 ms); acciones pause/play/seek/volumen en **16–20 ms** (antes hasta 2917 ms); cero bloqueos detectados por el watchdog. También: FFI siempre asíncrono (koffi `fn.async`, 0,117 ms/llamada medido), instancia de libVLC creada en worker con precalentado de plugins, mutex en `loadUrl` (todas las cargas en serie), watchdog del hilo principal que registra cada atasco en el log |
+| **El vídeo se quedaba en negro / congelado** | dos causas: (a) el stream del proxy se quedaba colgado sin datos y libVLC esperaba para siempre; (b) al morir el stream, libVLC quedaba en estado *Paused*/*Stopped*, indistinguible de una pausa pedida por el usuario | (a) el proxy corta cualquier stream sin datos durante 30 s (ventana rodante) y registra el evento; (b) la vigilancia del medio distingue pausa/stop pedidos (`intentionalPause`/`intentionalStop`) de los provocados por el motor: si la posición no avanza 20 s en un estado que debería avanzar, recarga la URL actual (re-resuelve con yt-dlp, porque las URLs caducan). Tope LRU de 60 entradas en el proxy para no crecer en memoria |
+| La barra de progreso iba a saltos con el sondeo a 1 s | el renderer escribía el valor tal cual le llegaba | el renderer **interpola** la posición con el reloj local (100 ms) a partir del último estado real |
 
 ---
 
@@ -273,11 +295,16 @@ UI-TEST: Stop -> estado=Stopped stopOk=true
     acciones pasan por el mismo dispatcher que el API externo (`origin:"user"`), así que el
     coordinador ve los cambios manuales del usuario.
   - **Una sola superficie de control**: la ventana inferior se eliminó (se solapaba con el título y
-    no se cerraba con la app). Todo —stop, anterior/siguiente, lista, búsqueda— vive en la barra.
+    no se cerraba con la app). Todo —stop, anterior/siguiente, listas, búsqueda— vive en la barra.
+  - **Una sola entrada en la barra de tareas**: la barra flotante usa `setSkipTaskbar(true)` y su
+    `<title>` es el mismo que el de la ventana principal, de modo que Windows las agrupa y no
+    aparece una segunda ventana "Controles" en la barra de tareas.
+  - **El menú del sistema (File, Edit, …) sólo aparece al pulsar Alt** (`autoHideMenuBar: true`).
 - **Lista de reproducción hardcodeada** (`src/playlist.js`): 8 vídeos verificados con `yt-dlp`
-  (`logs/videos-test.json`, todos `ok:true`, modo `range`, `seekOk:true`). El panel lateral tiene
-  altura máxima → **siempre hay scroll**; el elemento en curso se resalta y el índice real lo
-  lleva el proceso principal (fuente de verdad única: libVLC).
+  (`logs/videos-test.json`, todos `ok:true`, modo `range`, `seekOk:true`). Se usa **sólo como
+  respaldo** de ⏮/⏭ cuando la cola está vacía o el vídeo actual no está en ella. El panel lateral
+  muestra **las listas reales** del usuario (Favoritos, Ver más tarde y las propias), con botón
+  *atrás* para volver al listado de listas.
 - **Buscador sobre yt-dlp, sin tocar el motor**: la búsqueda usa `ytsearchN:<consulta>
   --flat-playlist --dump-single-json` (búsqueda *ligera*: no resuelve formatos ni descarga nada);
   los metadatos completos se piden **bajo demanda** y con cliente (`mweb`/`android`) porque el
@@ -460,10 +487,14 @@ data: {"type":"volumeChanged","playerId":"ciudadan-media-main","stateVersion":58
 
 - Buscador de YouTube por texto (o pegando una URL) con resultados **reales** y paginación por
   scroll; una búsqueda nueva **cancela** la anterior y el render no se congela.
+  - **URL pegada = reproducción directa**: si lo que se escribe en el buscador es una URL válida de
+    YouTube, se resuelve y **reproduce ese vídeo** sin mostrar resultados.
 - Tarjeta por resultado con miniatura, título, canal, visualizaciones, fecha (si existe),
   duración y descripción; distintivo **EN DIRECTO** para los vídeos en vivo.
+  - **Clic en la tarjeta = reproducir ahora**; debajo hay una fila de acciones rápidas
+    (*Cola*, *Favoritos*, *Más tarde*, *Más*).
 - **Menú contextual** por vídeo: *Reproducir ahora*, *Agregar a la cola*, *Reproducir a continuación*,
-  *Ver más tarde*, *Guardar en lista*, *Favoritos*, *Compartir* (copia el enlace).
+  *Ver más tarde*, *Guardar en lista*, *Favoritos*, *Compartir* (copia el enlace), *Ver detalles*.
 - **Ficha de detalle** con los metadatos disponibles y enrichment bajo demanda.
 - **Cola** con reordenación **arrastrando y soltar**, quitar, reproducir, vaciar y
   **avance automático** al terminar el vídeo actual.

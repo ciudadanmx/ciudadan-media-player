@@ -65,6 +65,32 @@ export class ContinuityEngine {
   }
 
   /**
+   * Prepara candidatos (hasta 3, sólo metadatos) para que el vídeo que SIGUE
+   * arranque sin espera al terminar el actual. Nunca lanza ni reproduce nada.
+   */
+  async prepare({ current = null, searchQuery = '', signal = null } = {}) {
+    if (this.busy || this.mode === 'solo') return { action: 'skipped' };
+    try {
+      const exclude = this.queue.items.map((i) => i.id).concat(current ? [String(current.id)] : []);
+      // Si la fuente configurada es "search" pero no hay consulta activa, se
+      // buscan relacionados por metadatos (tema/canal/categoría).
+      const source = (this.source === 'search' && !searchQuery) ? 'topic' : this.source;
+      const candidates = await this.discovery.candidatesFor({
+        source, current, searchQuery, limit: PREPARE_N * 2, signal, excludeIds: exclude,
+      }) || [];
+      if (!candidates.length) return { action: 'no-candidates' };
+      const pool = this._filterByContentMode(candidates);
+      const chosen = (pool.length ? pool : candidates).slice(0, PREPARE_N);
+      this.autoQueue = chosen.map((c) => (c && c.item) ? c.item : c);
+      this.log('continuidad: candidatos preparados (' + this.autoQueue.length + ', fuente ' + source + ')');
+      return { action: 'prepared', count: this.autoQueue.length };
+    } catch (e) {
+      this.log('continuidad: preparación falló (tolerado):', String((e && e.message) || e));
+      return { action: 'no-candidates' };
+    }
+  }
+
+  /**
    * Llamar cuando el medio termina (prev === 'playing').
    * Devuelve la decisión tomada (para pruebas y log).
    */
@@ -105,18 +131,42 @@ export class ContinuityEngine {
       // 3) Descubrimiento nuevo (sólo metadatos, hasta 3 preparados).
       //    Un error de red/búsqueda NUNCA debe detener la reproducción actual.
       const exclude = this.queue.items.map((i) => i.id).concat(current ? [String(current.id)] : []);
+      // Si la fuente configurada es "search" pero NO hay búsqueda activa (el
+      // usuario pegó una URL directa), se buscan vídeos RELACIONADOS por
+      // metadatos: sin este degradado la reproducción se quedaba detenida.
+      const primary = (this.source === 'search' && !searchQuery) ? 'topic' : this.source;
+      let usedSource = primary;
       let candidates = [];
       try {
         candidates = await this.discovery.candidatesFor({
-          source: this.source, current, searchQuery,
+          source: primary, current, searchQuery,
           limit: Math.max(10, PREPARE_N * 3), signal, excludeIds: exclude,
         }) || [];
       } catch (e) {
         this.log('continuidad: descubrimiento falló (tolerado):', String((e && e.message) || e));
-        return { action: 'no-candidates' };
+      }
+      // 3b) Si la fuente principal no dio nada, se prueban las demás (en orden)
+      //     antes de rendirse: el objetivo es seguir reproduciendo.
+      if (!candidates.length) {
+        for (const alt of ['topic', 'channel', 'discover', 'search']) {
+          if (alt === primary) continue;
+          try {
+            const r = await this.discovery.candidatesFor({
+              source: alt, current, searchQuery, limit: 9, signal, excludeIds: exclude,
+            }) || [];
+            if (r.length) {
+              candidates = r;
+              usedSource = alt;
+              this.log('continuidad: fuente de reserva (' + alt + ')');
+              break;
+            }
+          } catch (e) {
+            this.log('continuidad: fuente de reserva ' + alt + ' falló (tolerado)');
+          }
+        }
       }
       if (!candidates.length) {
-        this.log('continuidad: sin candidatos (fuente:', this.source + ')');
+        this.log('continuidad: sin candidatos (fuente:', usedSource + ')');
         return { action: 'no-candidates' };
       }
       // Filtrar por modo de contenido y mezclar si es personalizado.
@@ -129,7 +179,7 @@ export class ContinuityEngine {
         ? this.mix.pick(prepared.map((c) => ({ item: c, cls: c.classification || classifyItem(c) })))
         : { item: prepared[0], cls: prepared[0].classification, type: prepared[0].classification };
       if (!pick || !pick.item) return { action: 'no-candidates' };
-      this.log('continuidad: descubrimiento (' + this.source + ') ->', pick.item.title || pick.item.id,
+      this.log('continuidad: descubrimiento (' + usedSource + ') ->', pick.item.title || pick.item.id,
         this.contentMode === 'personalizado' ? 'mezcla=' + this.mix.stats().actualMusicPct?.toFixed(0) + '% música' : '');
       const decision = { action: 'play', origin: 'discover', item: pick.item };
       this.lastDecision = decision;

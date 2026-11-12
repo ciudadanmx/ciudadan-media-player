@@ -34,6 +34,40 @@ export function topicQueriesFrom(item, max = 3) {
   return queries.filter((q) => q && q.length >= 4).slice(0, max);
 }
 
+// Categorías de YouTube (en inglés) traducidas para poder buscar por tema.
+const CATEGORY_ES = {
+  music: 'música', entertainment: 'entretenimiento', education: 'educación',
+  documentary: 'documental', film: 'película', animation: 'animación',
+  people: 'personas', sports: 'deportes', gaming: 'videojuegos', news: 'noticias',
+  travel: 'viajes', howto: 'tutorial', science: 'ciencia', comedy: 'comedia',
+  musicvideo: 'música', filmanimation: 'película',
+};
+
+/**
+ * Consultas de "relacionados" derivadas de los METADATOS del vídeo actual.
+ * Se usan cuando no hay una búsqueda activa (p. ej. el usuario pegó una URL
+ * directa): sin esto, la continuidad se quedaba sin candidatos y no continuaba.
+ */
+export function relatedQueriesFrom(current, searchQuery = '', max = 4) {
+  const out = [];
+  const add = (q) => {
+    const s = String(q || '').trim();
+    if (s && s.length >= 3 && !out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s);
+  };
+  if (searchQuery) add(searchQuery);
+  for (const q of topicQueriesFrom(current, 3)) add(q);
+  if (current && current.title) {
+    // Título sin el sufijo comercial habitual (" - Oficial", "| 4K", …).
+    const t = String(current.title).replace(/\s*[-–|]\s*.*$/, '').trim();
+    if (t.length >= 4) add(t);
+  }
+  if (current && current.category) {
+    const c = String(current.category).toLowerCase().trim();
+    if (c) add(CATEGORY_ES[c] || c);
+  }
+  return out.slice(0, Math.max(1, max));
+}
+
 export class DiscoveryService {
   /**
    * @param {object} deps
@@ -73,9 +107,18 @@ export class DiscoveryService {
       }
     };
 
-    if (source === 'search' && searchQuery) {
-      const r = await run(this.search, searchQuery, { limit: Math.max(limit, 10), offset: 0, cancelPrevious: false, signal });
-      for (const it of (r && r.items) || []) push(it);
+    if (source === 'search') {
+      // La búsqueda activa es la primera opción; si no hay (el usuario pegó una
+      // URL directa) o si no devuelve nada, se buscan vídeos RELACIONADOS por
+      // metadatos (tema del título, canal, categoría).
+      const queries = [];
+      if (searchQuery) queries.push(String(searchQuery));
+      for (const q of relatedQueriesFrom(current, '', 3)) queries.push(q);
+      for (const q of queries) {
+        const r = await run(this.search, q, { limit: Math.max(limit, 10), offset: 0, cancelPrevious: false, signal });
+        for (const it of (r && r.items) || []) push(it);
+        if (out.length >= limit) break;
+      }
     } else if (source === 'channel' && current) {
       const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null)
         || (current.uploaderId ? `https://www.youtube.com/@${current.uploaderId}` : null);
@@ -85,14 +128,14 @@ export class DiscoveryService {
       }
       // Si el canal no dio candidatos (o no hay fetchFlat), caer a tema.
       if (!out.length) {
-        for (const q of topicQueriesFrom(current, 2)) {
+        for (const q of relatedQueriesFrom(current, '', 3)) {
           const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
           for (const it of (r && r.items) || []) push(it);
           if (out.length >= limit) break;
         }
       }
-    } else if (source === 'topic' && current) {
-      for (const q of topicQueriesFrom(current, 3)) {
+    } else if (source === 'topic') {
+      for (const q of relatedQueriesFrom(current, '', 4)) {
         const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
         for (const it of (r && r.items) || []) push(it);
         if (out.length >= limit) break;
@@ -106,7 +149,7 @@ export class DiscoveryService {
           for (const it of (r && r.items) || []) push(it);
         }
       }
-      const queries = current ? topicQueriesFrom(current, 2) : (searchQuery ? [searchQuery] : []);
+      const queries = current ? relatedQueriesFrom(current, '', 2) : (searchQuery ? [searchQuery] : []);
       for (const q of queries) {
         const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
         for (const it of (r && r.items) || []) push(it);
@@ -116,6 +159,11 @@ export class DiscoveryService {
         const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal });
         for (const it of (r && r.items) || []) push(it);
       }
+    }
+    if (!out.length && source !== 'search' && searchQuery) {
+      // Último recurso: la búsqueda activa.
+      const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal });
+      for (const it of (r && r.items) || []) push(it);
     }
     return out.slice(0, limit);
   }

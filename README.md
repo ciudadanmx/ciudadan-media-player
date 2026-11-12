@@ -550,6 +550,11 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
   metadatos/palabras clave, **no** de `relatedToVideoId`). Los errores nunca detienen la
   reproducción y no hay transiciones END duplicadas. Verificado en real: `solo` no avanza;
   `continuo` avanza solo al terminar (zoo → siguiente vídeo, `playing`).
+  - **Sigue reproduciendo aunque no haya ninguna búsqueda activa** (el caso de pegar una URL
+    directa): si la fuente configurada no devuelve candidatos, la continuidad degrada a
+    *relacionados por metadatos* (tema del título, canal, categoría) y, si tampoco, prueba las
+    demás fuentes antes de detenerse. Además se **preparan ≤3 candidatos al cargar** cada medio
+    (en segundo plano, sólo metadatos) para que el siguiente arranque sin espera.
 - **Subtítulos reales (CC)** con libVLC, no IFrame: botón `[CC]` + selector de idioma en la
   barra; descarga la pista preferida (es → en) de los metadatos de yt-dlp a `.vtt` local y la
   engancha con `:input-slave=file:///...` (con streams HTTP `sub-file=` **no** engancha;
@@ -594,8 +599,8 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
 | `renderer/search/explorer-sprint.js` | UI del sprint: modos, popover de mezcla, popover de filtros, panel de historial |
 | `renderer/search/explorer.js`, `explorer-utils.js`, `explorer.css` | Integración (botones Filtros/Historial, pestaña Historial, filtros por modo, insignias de clase) |
 | `renderer/yt-controls.html`, `yt-controls.js` | Botones `[CC]`+idioma+`[Solo/∞]`+fuente en la barra con sus popovers |
-| `tools/test-services.mjs` | **57/57 PASS** — unitarias de classifier, mix (70/30 exacto, maxRun, fallback/recuperación), history, continuity, discovery, filtros sp/local |
-| `tools/test-sprint-ui.mjs` | **40/40 PASS** — integración real con app viva: reproducción verificada, solo/continuo, CC SPU real, historial/playHistory, filtros persistentes, UI vía CDP |
+| `tools/test-services.mjs` | **65/65 PASS** — unitarias de classifier, mix (70/30 exacto, maxRun, fallback/recuperación), history, continuity (incl. "sin búsqueda activa → continúa con relacionados" y degradación de fuentes), discovery (relacionados por metadatos), filtros sp/local |
+| `tools/test-sprint-ui.mjs` | **41/41 PASS** — integración real con app viva: reproducción verificada, caso del usuario (URL directa sin búsqueda → sigue con un relacionado), solo/continuo, CC SPU real, historial/playHistory, filtros persistentes, UI vía CDP |
 | `tools/probe-spu.mjs` | Sonda aislada de libVLC (file:// vs HTTP; demostró `input-slave` y el fix de `koffi.address`/decode) |
 | `tools/final-check.mjs` | Verificación final: `playing` con posición avanzando (0→4200 ms) y volumen 100 vía API |
 
@@ -603,8 +608,8 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
 
 | Suite | Resultado |
 |---|---|
-| `node tools\test-services.mjs` | **57/57 PASS** |
-| `node tools\test-sprint-ui.mjs` | **40/40 PASS** (exit 0) — incluye CC SPU real en reproducción (`selected=2` pista real, `-1` desactiva), avance continuo real (zoo → siguiente), modo solo sin avance, historial persistente + búsqueda local + export, `playHistory` sin duplicar (playCount +1), filtros sp persistentes, UI completa vía CDP |
+| `node tools\test-services.mjs` | **65/65 PASS** |
+| `node tools\test-sprint-ui.mjs` | **41/41 PASS** (exit 0) — incluye **el caso reportado por el usuario**: vídeo cargado por URL directa **sin búsqueda previa** → al terminar **sigue con un vídeo relacionado** (`cola automática -> Me at the zoo … @jawed` en el log real); CC SPU real en reproducción (`selected=2` pista real, `-1` desactiva); avance continuo real (zoo → siguiente), modo solo sin avance, historial persistente + búsqueda local + export, `playHistory` sin duplicar (playCount +1), filtros sp persistentes, UI completa vía CDP |
 | `node tools\test-control-api.mjs` | **25/25 PASS** (sin regresión) |
 | `node tools\test-yt-controls.mjs` | **25/25 PASS** (sin regresión) |
 | `node tools\test-search.mjs` | **16/16 PASS** (sin regresión) |

@@ -112,6 +112,22 @@ async function main() {
   if (!await waitApi()) { check('la app arranca con el API', false); finish(); return; }
   check('la app arranca con el API', true, 'puerto ' + API_PORT);
 
+  // ---- CASO REAL DEL USUARIO: reproducción por URL directa (SIN búsqueda
+  // ---- previa) debe continuar con vídeos relacionados al terminar ----
+  await apiCmd('clearQueue');
+  await apiCmd('setContinuity', { mode: 'continuo', source: 'search' });
+  const st0 = await waitStatus('playing', 180000);
+  const urlDirect = st0 ? st0.url : null;
+  const endedDirect = await waitStatus(null, 120000, (s) => s.status === 'ended' || s.status === 'stopped' || s.status === 'idle');
+  let advDirect = null;
+  for (let i = 0; i < 120; i++) {
+    await sleep(1000);
+    const s = await apiState();
+    if (s && s.url && urlDirect && s.url !== urlDirect && (s.status === 'playing' || s.status === 'opening' || s.status === 'buffering')) { advDirect = s; break; }
+  }
+  check('al terminar un vídeo SIN búsqueda previa sigue con vídeos relacionados', !!advDirect,
+    advDirect ? (urlDirect || '?') + ' -> ' + advDirect.url + ' (' + advDirect.status + ')' : 'no avanzó (fin=' + (endedDirect ? endedDirect.status : 'timeout') + ')');
+
   // ---- modo solo PRIMERO (antes de que el vídeo de 19 s pueda terminar y
   // ---- encadenar porPrefs persistidas de ejecuciones anteriores) ----
   await apiCmd('setContinuity', { mode: 'solo' });

@@ -373,6 +373,8 @@ let currentUrl = '';
 let currentChannel = null;
 let currentChannelId = null;
 let currentChannelUrl = null;
+let currentCategory = null;
+let currentUploaderId = null;
 // Índice actual dentro de la lista hardcodeada (src/playlist.js).
 let currentPlaylistIndex = 0;
 // Control API local (coordinador Node.js) y control de estado.
@@ -442,6 +444,8 @@ async function loadUrlInner(url, origin = 'user') {
     currentChannel = entry.channel || null;
     currentChannelId = entry.channelId || null;
     currentChannelUrl = entry.channelUrl || null;
+    currentCategory = entry.category || null;
+    currentUploaderId = entry.uploaderId || null;
     // Si la URL cargada es un elemento de la lista, se marca como actual.
     const plIdx = PLAYLIST.findIndex((it) => it.url === url || (entry.id && it.id === entry.id));
     if (plIdx >= 0) currentPlaylistIndex = plIdx;
@@ -474,6 +478,21 @@ async function loadUrlInner(url, origin = 'user') {
     if (!winVideo || winVideo.isDestroyed()) {
       throw new Error('la ventana de video esta cerrada: no se puede reproducir (vuelve a abrir la app)');
     }
+    // Continuidad: se preparan (en segundo plano, sólo metadatos) hasta 3
+    // candidatos para el vídeo SIGUIENTE. Así, al terminar el actual, el
+    // siguiente arranca sin espera aunque no haya ninguna búsqueda activa.
+    // No bloquea la reproducción ni el hilo principal.
+    try {
+      const prepMeta = {
+        id: entry.id, title: entry.title, url,
+        channel: entry.channel, channelId: entry.channelId, channelUrl: entry.channelUrl,
+        category: entry.category, uploaderId: entry.uploaderId,
+      };
+      setTimeout(() => {
+        continuity.prepare({ current: prepMeta, searchQuery: lastSearchQuery })
+          .catch((e) => log('continuidad: preparación ignorada:', String(e.message || e)));
+      }, 4000);
+    } catch {}
     const hwndBuf = winVideo.getNativeWindowHandle();
     // Antes de cambiar de medio se corta el stream anterior: si el hilo de
     // entrada de libVLC sigue leyendo del socket, su stop() interno se bloquea
@@ -585,7 +604,12 @@ function scheduleEngineSync() {
       if (prev === 'playing') {
         try {
           historyRepo.markFinished(currentId);
-          continuity.handleEnded({ current: { id: currentId, title: currentTitle, url: currentUrl, channel: currentChannel, channelId: currentChannelId, channelUrl: currentChannelUrl }, searchQuery: lastSearchQuery })
+          const meta = {
+            id: currentId, title: currentTitle, url: currentUrl,
+            channel: currentChannel, channelId: currentChannelId, channelUrl: currentChannelUrl,
+            category: currentCategory, uploaderId: currentUploaderId,
+          };
+          continuity.handleEnded({ current: meta, searchQuery: lastSearchQuery })
             .catch((e) => log('ERROR continuidad:', String(e.message || e)));
         } catch (e) { log('ERROR continuidad:', String(e.message || e)); }
       }

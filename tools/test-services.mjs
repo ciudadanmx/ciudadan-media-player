@@ -253,6 +253,65 @@ console.log('\n== DiscoveryService ==');
   const r4 = await discErr.candidatesFor({ source: 'search', searchQuery: 'x' });
   check('error de red en descubrimiento => lista vacía, sin lanzar', Array.isArray(r4) && r4.length === 0);
   check('candidatos clasificados', r1.every((c) => 'classification' in c));
+
+  // --- Regresión del usuario: sin búsqueda activa NO puede quedarse sin candidatos ---
+  const seen2 = [];
+  const search2 = async (q) => {
+    seen2.push(q);
+    return { items: [{ id: 'rel' + seen2.length, title: 'relacionado para ' + q }, { id: 'cur', title: 'el actual' }] };
+  };
+  const disc2 = new DiscoveryService({ search: search2, log: () => {} });
+  const r5 = await disc2.candidatesFor({ source: 'search', searchQuery: '', current: { id: 'cur', title: 'Me at the zoo' }, limit: 5 });
+  check('sin búsqueda activa busca relacionados por metadatos (tema/canal/título)', r5.length >= 1 && seen2.length >= 1, `queries=${JSON.stringify(seen2)}`);
+  check('excluye el vídeo actual', !r5.some((c) => c.id === 'cur'));
+  const r6 = await disc2.candidatesFor({ source: 'topic', current: { id: 'cur', title: 'Me at the zoo' }, limit: 5 });
+  check('fuente "tema" usa el título aunque no haya palabras largas', r6.length >= 1 && seen2.some((q) => /me at the zoo/i.test(q)), `queries=${JSON.stringify(seen2.slice(-3))}`);
+  const r7 = await disc2.candidatesFor({ source: 'search', searchQuery: 'consulta activa', current: { id: 'cur', title: 'Big Buck Bunny' }, limit: 5 });
+  check('con búsqueda activa se usa primero esa consulta', seen2.includes('consulta activa'));
+}
+
+// ------------------------------------------------- continuidad: caso "sin búsqueda"
+console.log('\n== Continuidad: continuar sin búsqueda activa ==');
+{
+  const played = [];
+  const search = async (q) => ({ items: [{ id: 'rel1', title: 'relacionado: ' + q }] });
+  const disc = new DiscoveryService({ search, log: () => {} });
+  const q = { items: [], currentIndex: -1, autoAdvance: true, nextItem: () => null, setAutoAdvance: () => {} };
+  const eng = new ContinuityEngine({
+    queue: q, discovery: disc, mix: new MixScheduler({ musicPct: 50 }),
+    onPlay: async (it) => { played.push(it.id); }, log: () => {},
+  });
+  eng.setMode('continuo');
+  eng.setSource('search');
+  // Sin búsqueda activa y con el vídeo actual con metadatos:
+  const d = await eng.handleEnded({ current: { id: 'cur', title: 'Me at the zoo', channel: 'zoosworld' }, searchQuery: '' });
+  check('sin búsqueda activa CONTINÚA con un vídeo relacionado', d.action === 'play' && d.origin === 'discover', JSON.stringify(d));
+  await new Promise((r) => setTimeout(r, 700));
+  check('se reproduce el candidato encontrado', played.length === 1, `played=${JSON.stringify(played)}`);
+
+  // Preparación anticipada: deja candidatos listos para el final del medio.
+  const eng2 = new ContinuityEngine({
+    queue: { items: [], currentIndex: -1, autoAdvance: true, nextItem: () => null, setAutoAdvance: () => {} },
+    discovery: disc, onPlay: async () => {}, log: () => {},
+  });
+  const prep = await eng2.prepare({ current: { id: 'cur', title: 'Big Buck Bunny' }, searchQuery: '' });
+  check('preparación anticipada deja candidatos listos', prep.action === 'prepared' && eng2.autoQueue.length >= 1 && eng2.autoQueue.length <= 3, JSON.stringify(prep));
+
+  // Degradación: la fuente configurada falla -> se prueban las demás.
+  let calls = [];
+  const discAlt = new DiscoveryService({
+    search: async (qq) => { calls.push(qq); return { items: [{ id: 'alt', title: 'de reserva' }] }; },
+    fetchFlat: async () => { throw new Error('sin canal'); },
+    log: () => {},
+  });
+  const eng3 = new ContinuityEngine({
+    queue: { items: [], currentIndex: -1, autoAdvance: true, nextItem: () => null, setAutoAdvance: () => {} },
+    discovery: discAlt, onPlay: async () => {}, log: () => {},
+  });
+  eng3.setMode('continuo');
+  eng3.setSource('channel');
+  const d3 = await eng3.handleEnded({ current: { id: 'cur', title: 'Tema sin canal' }, searchQuery: '' });
+  check('fuente sin resultados degrada a otra fuente y continúa', d3.action === 'play', JSON.stringify(d3));
 }
 
 // ---------------------------------------------------------------- filtros proveedor

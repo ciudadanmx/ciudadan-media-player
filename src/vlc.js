@@ -5,6 +5,11 @@ import { LIBVLC_DLL, VLC_PLUGINS } from './paths.js';
 
 let apiCache = null;
 
+// Espejo de libvlc_track_description_t { int i_id; char *psz_name; ... next }
+// Registrado UNA sola vez (a nivel de módulo): redefinirlo en cada llamada
+// puede lanzar en koffi si el nombre ya existe en el proceso.
+const TRACK_DESC = koffi.struct('libvlc_track_description_t_mirror', { i_id: 'int', psz_name: 'str', p_next: 'void *' });
+
 // Eventos libvlc (libvlc_event_e)
 export const EV = {
   MediaPlayerMediaChanged: 0x100, Opening: 0x101, Buffering: 0x102, Playing: 0x103,
@@ -59,6 +64,13 @@ export function loadLibvlc(extraArgs = []) {
     libvlc_audio_set_mute: lib.func('int libvlc_audio_set_mute(libvlc_media_player_t *player, int mute)'),
     libvlc_audio_get_mute: lib.func('int libvlc_audio_get_mute(libvlc_media_player_t *player)'),
     libvlc_media_player_set_media: lib.func('void libvlc_media_player_set_media(libvlc_media_player_t *player, libvlc_media_t *media)'),
+    // --- pistas de subtítulos (SPU): control REAL porque usamos libVLC -------
+    libvlc_video_get_spu_count: lib.func('int libvlc_video_get_spu_count(libvlc_media_player_t *player)'),
+    libvlc_video_get_spu: lib.func('int libvlc_video_get_spu(libvlc_media_player_t *player)'),
+    // i_spu = -1 desactiva los subtítulos; >=0 selecciona la pista con ese id.
+    libvlc_video_set_spu: lib.func('int libvlc_video_set_spu(libvlc_media_player_t *player, int i_spu)'),
+    libvlc_video_get_spu_description: lib.func('void *libvlc_video_get_spu_description(libvlc_media_player_t *player)'),
+    libvlc_track_description_list_release: lib.func('void libvlc_track_description_list_release(void *p)'),
     // utilidades de diagnóstico
     libvlc_errmsg: lib.func('const char *libvlc_errmsg()'),
     libvlc_get_version: lib.func('const char *libvlc_get_version()'),
@@ -118,7 +130,7 @@ export class VlcPlayer {
     //     curso, se devuelve la caché sin tocar libVLC.
     this._busy = 0;
     this._chain = Promise.resolve();
-    this._last = { state: 0, time: 0, length: 0, volume: 100, mute: false };
+    this._last = { state: 0, time: 0, length: 0, volume: 100, mute: false, spu: -1 };
   }
 
   /** true si hay una operación bloqueante en curso (no se consulta libVLC). */
@@ -283,6 +295,10 @@ export class VlcPlayer {
         const m = await this._call(a.libvlc_audio_get_mute, this.player);
         if (typeof m === 'number') this._last.mute = !!m;
       } catch {}
+      try {
+        const spu = await this._call(a.libvlc_video_get_spu, this.player);
+        if (typeof spu === 'number') this._last.spu = spu;
+      } catch {}
     }
     // El coste de esta sincronización se mide: si sube, el sondeo se está
     // comiendo el hilo principal (y con él, la interfaz y el API).
@@ -313,6 +329,73 @@ export class VlcPlayer {
     const len = this.getLength();
     if (!len) return 0;
     return Math.max(0, Math.min(1, this.getTime() / len));
+  }
+
+  // --- Subtítulos (pistas SPU del medio actual) -------------------------------
+  // Todas las lecturas/escrituras son ASÍNCRONAS (igual que el resto de FFI):
+  // una llamada síncrona puede bloquear el hilo principal.
+  async getSubtitleTrack() {
+    if (!this.player) return -1;
+    try { return await this._call(this.api.libvlc_video_get_spu, this.player); } catch { return -1; }
+  }
+
+  /** Selecciona una pista por su id (>=0) o desactiva subtítulos (-1). */
+  async setSubtitleTrack(spuId) {
+    if (!this.player) return -1;
+    const id = spuId === null || spuId === undefined ? -1 : Math.trunc(Number(spuId));
+    return this._enqueue(async () => {
+      const rc = await this._call(this.api.libvlc_video_set_spu, this.player, id);
+      this._last.spu = id;
+      return rc;
+    });
+  }
+
+  /**
+   * Lista las pistas de subtítulos disponibles: [{ id, name, selected }].
+   * Recorre la lista enlazada de libvlc_track_description_t con koffi.
+   */
+  /** Diagnóstico: número crudo de pistas SPU que ve libVLC ahora mismo. */
+  async getSpuCountRaw() {
+    if (!this.player) return -1;
+    return this._enqueue(async () => {
+      try { return await this._call(this.api.libvlc_video_get_spu_count, this.player); } catch { return -2; }
+    });
+  }
+
+  async getSubtitleTracks() {
+    if (!this.player) return [];
+    return this._enqueue(async () => {
+      const a = this.api;
+      const tracks = [];
+      try {
+        const count = await this._call(a.libvlc_video_get_spu_count, this.player);
+        const current = await this._call(a.libvlc_video_get_spu, this.player);
+        this._last.spu = current;
+        if (!count || count < 0) return [];
+        // Estructura: { int i_id; char *psz_name; void *p_next } (registrada una
+        // sola vez a nivel de módulo: redefinirla en cada llamada puede lanzar).
+        let head = null;
+        try { head = await this._call(a.libvlc_video_get_spu_description, this.player); } catch { head = null; }
+        if (head && koffi.address(head) !== 0n) {
+          let p = head;
+          let guard = 0;
+          while (p && koffi.address(p) !== 0n && guard++ < 64) {
+            let d;
+            try { d = koffi.decode(p, TRACK_DESC); } catch { break; }
+            tracks.push({ id: d.i_id, name: String(d.psz_name || ('Pista ' + d.i_id)), selected: d.i_id === current });
+            p = d.p_next; // void* -> external; address 0 = fin de lista
+          }
+          try { await this._call(a.libvlc_track_description_list_release, head); } catch {}
+        }
+        if (!tracks.length && count > 0) {
+          // Fallback sin nombres: por índice.
+          for (let i = 0; i < count; i++) tracks.push({ id: i, name: 'Pista ' + i, selected: i === current });
+        }
+        return tracks;
+      } catch (e) {
+        return [];
+      }
+    });
   }
 
   // safe=true: NO libera el media player si sigue en reproducción (al salir de la app).

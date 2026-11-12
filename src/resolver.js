@@ -10,6 +10,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { YT_CLIENTS, TOOLS } from './paths.js';
+import { subtitleTracksFromInfo } from './subtitles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -91,6 +92,15 @@ export async function resolveYouTube(videoUrl) {
       const base = {
         id, title: j.title || videoUrl, duration: j.duration || 0,
         client, url: j.url || null, sourceUrl: videoUrl, headers,
+        // Metadatos para continuidad/clasificación (sólo datos reales de yt-dlp):
+        channel: j.channel || j.uploader || null,
+        channelId: j.channel_id || null,
+        channelUrl: j.channel_url || j.uploader_url || null,
+        uploaderId: j.uploader_id || null,
+        category: j.category || null,
+        description: j.description || null,
+        // Pistas de subtítulos disponibles (se descargan aparte, sin bloquear).
+        subtitleTracks: subtitleTracksFromInfo(j),
       };
       const muxed = j.vcodec && j.vcodec !== 'none' && j.acodec && j.acodec !== 'none';
       const proto = j.protocol || '';

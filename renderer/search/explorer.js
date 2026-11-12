@@ -57,10 +57,35 @@
     const filtersBox = U.el('div', { class: 'ex-filters' });
     top.appendChild(filtersBox);
 
+    // --- Sprint: [Filtros] [Historial] junto al buscador ----------------------
+    const topActions = U.el('div', { class: 'ex-top-actions' });
+    const filtersBtn = U.el('button', { id: 'exFiltersBtn', class: 'ex-btn icon', type: 'button', title: 'Filtros de búsqueda' });
+    filtersBtn.appendChild(U.icon('filter'));
+    const filterBadge = U.el('span', { id: 'exFilterCount', class: 'ex-badge', text: '0', style: 'display:none' });
+    filtersBtn.appendChild(filterBadge);
+    const historyBtn = U.el('button', { id: 'exHistoryBtn', class: 'ex-btn icon', type: 'button', title: 'Historial de reproducción y búsquedas' });
+    historyBtn.appendChild(U.icon('clock'));
+    topActions.appendChild(filtersBtn);
+    topActions.appendChild(historyBtn);
+    top.appendChild(topActions);
+
     const cancel = U.el('button', { id: 'modalCancel', class: 'ex-btn icon', type: 'button', title: 'Cerrar' });
     cancel.appendChild(U.icon('close'));
     top.appendChild(cancel);
     root.appendChild(top);
+
+    // --- Fila de modos de contenido: [Música] [Temas] [Personalizado] ---------
+    const modes = U.el('div', { class: 'ex-modes', id: 'exModes' });
+    for (const [id, label] of [['musica', 'Música'], ['temas', 'Temas'], ['personalizado', 'Personalizado']]) {
+      modes.appendChild(U.el('button', { class: 'ex-mode', type: 'button', 'data-mode': id, text: label }));
+    }
+    root.appendChild(modes);
+
+    // Popovers del sprint (los construye explorer-sprint.js).
+    const mixPop = U.el('div', { class: 'ex-pop', id: 'exMixPop' });
+    const filterPop = U.el('div', { class: 'ex-pop', id: 'exFilterPop' });
+    root.appendChild(mixPop);
+    root.appendChild(filterPop);
 
     // -- pestañas
     const tabs = U.el('div', { class: 'ex-tabs' });
@@ -75,6 +100,7 @@
     const badge = U.el('span', { id: 'exQueueCount', class: 'ex-badge', text: '0' });
     tabQueue.appendChild(badge);
     mkTab('lists', 'Listas');
+    mkTab('history', 'Historial');
     const now = U.el('div', { class: 'ex-now' });
     now.appendChild(U.el('span', { class: 'dot' }));
     const nowTitle = U.el('b', { id: 'exNowTitle', text: 'Nada reproduciéndose' });
@@ -118,7 +144,10 @@
     split.appendChild(side); split.appendChild(right);
     paneLists.appendChild(split);
 
-    body.appendChild(paneResults); body.appendChild(paneQueue); body.appendChild(paneLists);
+    // Panel de historial (la lógica vive en explorer-sprint.js).
+    const paneHistory = U.el('div', { class: 'ex-pane', id: 'exPaneHistory' });
+
+    body.appendChild(paneResults); body.appendChild(paneQueue); body.appendChild(paneLists); body.appendChild(paneHistory);
     root.appendChild(body);
 
     // -- ficha de detalle
@@ -193,7 +222,7 @@
       try {
         // La primera página cancela la búsqueda anterior; la paginación NO
         // (si no, pedir la página 2 abortaría la página 1).
-        const res = await cmp.search({ query: state.query, limit: PAGE, offset: state.offset, cancelPrevious: !!first });
+        const res = await cmp.search({ query: state.query, limit: PAGE, offset: state.offset, cancelPrevious: !!first, filters: state.filters || {} });
         // Una búsqueda más nueva invalida esta respuesta.
         if (myReq !== state.reqId) return;
         if (!res || !res.ok) {
@@ -211,6 +240,9 @@
         state.items = state.items.concat(items);
         state.hasMore = !!res.hasMore;
         state.offset += items.length;
+        // Clasificación Música/Temas (servicio del proceso principal) antes de
+        // pintar: el modo de contenido filtra sobre estas clases.
+        if (sprintApi) await sprintApi.afterResults(state.items);
         renderResults();
         if (!state.items.length) setStatus('empty', 'Sin resultados para "' + state.query + '".');
         else setStatus(null);
@@ -238,8 +270,12 @@
 
     function renderResults() {
       U.clear(grid);
-      const items = visibleItems();
+      let items = visibleItems();
+      // Filtro del modo de contenido (Música/Temas) sobre las clases calculadas
+      // por el servicio de clasificación del proceso principal.
+      if (sprintApi) items = sprintApi.filterByMode(state, items);
       for (const it of items) grid.appendChild(Res.card(it, app));
+      if (sprintApi) sprintApi.decorateCards(grid);
       if (state.filters.duration && state.filters.duration !== 'any') {
         grid.appendChild(U.el('div', {
           class: 'ex-note',
@@ -255,25 +291,17 @@
         const providers = (res && res.providers) || [];
         const p = providers[0];
         if (!p) return;
+        // Los filtros se pintan en el popover del sprint (exFiltersBtn); aquí
+        // sólo se guarda la declaración de capacidades del proveedor.
         state.capabilities = p.capabilities || {};
-        buildFilters(state.capabilities);
       } catch (e) { /* sin filtros: la búsqueda funciona igual */ }
     }
 
-    function buildFilters(caps) {
+    function buildFilters(_caps) {
+      // Sustituido por el popover de filtros del sprint (exFilterPop):
+      // los filtros ya no ocupan la barra superior ni se aplican en local uno
+      // a uno aquí; el popover los envía al proveedor y persiste los activos.
       U.clear(filtersBox);
-      const filters = (caps && caps.filters) || [];
-      for (const f of filters) {
-        const sel = U.el('select', { class: 'ex-filter', 'data-filter': f.id });
-        for (const opt of (f.options || [])) {
-          const op = U.el('option', { value: opt.id, text: opt.name });
-          sel.appendChild(op);
-        }
-        sel.value = state.filters[f.id] || (f.options && f.options[0] ? f.options[0].id : 'any');
-        state.filters[f.id] = sel.value;
-        sel.addEventListener('change', () => { state.filters[f.id] = sel.value; renderResults(); });
-        filtersBox.appendChild(sel);
-      }
     }
 
     // ------------------------------------------------------------- acciones
@@ -428,8 +456,10 @@
       paneResults.classList.toggle('active', id === 'results');
       paneQueue.classList.toggle('active', id === 'queue');
       paneLists.classList.toggle('active', id === 'lists');
+      paneHistory.classList.toggle('active', id === 'history');
       if (id === 'queue') refreshQueue();
       if (id === 'lists') refreshLists();
+      if (id === 'history' && window.CMPExplorerSprint && sprintApi) sprintApi.loadHistory(false);
     }
 
     // ----------------------------------------------------------------- API
@@ -545,11 +575,24 @@
     const nowTimer = setInterval(updateNow, 2000);
 
     // ------------------------------------------------------------------ API
+    // --- Sprint: cableado de modos/filtros/historial (módulo aparte) -----------
+    const sprintApi = window.CMPExplorerSprint ? window.CMPExplorerSprint.wire({
+      cmp, U, root, state, input,
+      doSearch: (q) => doSearch(q),
+      fetchPage: (first) => fetchPage(first),
+      showTab,
+      say,
+      closeModal: () => close(),
+      refreshQueue,
+      modes, mixPop, filterPop, filtersBtn, filterBadge, historyBtn, paneHistory,
+    }) : null;
+
     function open() {
       loadCapabilities();
       refreshQueue();
       refreshLists();
       updateNow();
+      if (sprintApi) sprintApi.init();   // prefs + filtros persistidos + historial
       // El foco se pone de inmediato (el campo debe poder escribirse nada más
       // abrir) y se repite un instante después por si el navegador aún no ha
       // pintado la ventana.

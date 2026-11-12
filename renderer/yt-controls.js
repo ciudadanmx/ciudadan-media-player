@@ -294,6 +294,121 @@ function render(s) {
   icoFull.style.display = s.fullscreen ? 'none' : 'block';
   icoExit.style.display = s.fullscreen ? 'block' : 'none';
   body.classList.toggle('buffering', s.status === 'buffering' || s.status === 'opening');
+  // Al cambiar de medio se refrescan las pistas de subtítulos disponibles.
+  // Las pistas SPU tardan un poco en aparecer (libVLC las enumera tras parsear
+  // el medio): se reintenta unas veces antes de concluir "sin pistas".
+  if (s.videoId !== lastSprintVideoId) {
+    lastSprintVideoId = s.videoId;
+    let tries = 0;
+    const retry = async () => {
+      await refreshSubtitleUI();
+      tries++;
+      if (tries < 6) {
+        try {
+          const t = await cmp.subtitleTracks();
+          if (!t || !t.tracks || !t.tracks.length) setTimeout(retry, 2000);
+        } catch { setTimeout(retry, 2000); }
+      }
+    };
+    retry();
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Sprint: continuidad ([Solo este | Continuo] + fuente) y subtítulos (CC/idioma).
+// La UI sólo refleja prefs y emite acciones; la lógica vive en el proceso main.
+// ---------------------------------------------------------------------------
+const contBtn = $('contBtn'), contPop = $('contPop'), contSource = $('contSource');
+const ccBtn = $('ccBtn'), langSel = $('langSel'), subPop = $('subPop'), subTracks = $('subTracks');
+let lastSprintVideoId = null;
+
+async function refreshContinuityUI() {
+  try {
+    const r = await cmp.getContinuity();
+    const c = (r && r.continuity) || {};
+    const mode = c.mode || 'continuo';
+    document.querySelectorAll('input[name=contMode]').forEach((rb) => { rb.checked = rb.value === mode; });
+    contSource.value = c.source || 'search';
+    contBtn.classList.toggle('on', mode !== 'solo');
+    contBtn.classList.toggle('off', mode === 'solo');
+    contBtn.textContent = mode === 'solo' ? 'Solo' : '∞';
+    contBtn.title = 'Continuidad: ' + (mode === 'solo' ? 'solo este vídeo' : 'continuo desde ' + contSource.value);
+  } catch {}
+}
+contBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  subPop.classList.remove('show');
+  contPop.classList.toggle('show');
+});
+document.querySelectorAll('input[name=contMode]').forEach((rb) => {
+  rb.addEventListener('change', async () => {
+    await cmp.setContinuity({ mode: rb.value }).catch(() => {});
+    await refreshContinuityUI();
+  });
+});
+contSource.addEventListener('change', async () => {
+  await cmp.setContinuity({ source: contSource.value }).catch(() => {});
+  await refreshContinuityUI();
+});
+
+async function refreshSubtitleUI() {
+  try {
+    const p = await cmp.getSubtitlePrefs();
+    const en = p && p.subtitles ? p.subtitles.enabled !== false : true;
+    ccBtn.classList.toggle('on', en);
+    ccBtn.classList.toggle('off', !en);
+    langSel.value = (p && p.subtitles && p.subtitles.lang) || 'es';
+  } catch {}
+  try {
+    const t = await cmp.subtitleTracks();
+    const tracks = (t && t.tracks) || [];
+    const sel = t ? t.selected : -1;
+    subTracks.innerHTML = '';
+    const mk = (label, id, isSel) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = isSel ? 'sel' : '';
+      b.textContent = label + (isSel ? '  ✓' : '');
+      b.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        await cmp.setSubtitleTrack(id).catch(() => {});
+        await refreshSubtitleUI();
+      });
+      subTracks.appendChild(b);
+    };
+    if (!tracks.length) {
+      const d = document.createElement('div');
+      d.className = 'none';
+      d.textContent = 'Sin pistas de subtítulos en este vídeo';
+      subTracks.appendChild(d);
+    } else {
+      mk('Desactivados', -1, sel === -1);
+      for (const tr of tracks.filter((t) => t.id >= 0)) mk(tr.name || ('Pista ' + tr.id), tr.id, sel === tr.id);
+    }
+  } catch {}
+}
+ccBtn.addEventListener('click', async (e) => {
+  e.stopPropagation();
+  contPop.classList.remove('show');
+  const p = await cmp.getSubtitlePrefs().catch(() => null);
+  const en = !(p && p.subtitles && p.subtitles.enabled !== false);
+  await cmp.setSubtitlePrefs({ enabled: en }).catch(() => {});
+  subPop.classList.add('show');   // al conmutar se muestran las pistas reales
+  await refreshSubtitleUI();
+});
+langSel.addEventListener('change', async () => {
+  await cmp.setSubtitlePrefs({ lang: langSel.value }).catch(() => {});
+  subPop.classList.add('show');
+  await refreshSubtitleUI();
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#contPop') && !e.target.closest('#contBtn')) contPop.classList.remove('show');
+  if (!e.target.closest('#subPop') && !e.target.closest('#ccBtn') && !e.target.closest('#langSel')) subPop.classList.remove('show');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { contPop.classList.remove('show'); subPop.classList.remove('show'); }
+});
+refreshContinuityUI();
+refreshSubtitleUI();
 
 (async () => { state = await cmp.state(); })();

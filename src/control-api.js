@@ -28,6 +28,12 @@ export const API_COMMANDS = [
   // Buscador (proveedor de búsqueda).
   'search', 'searchDetails', 'searchProviders',
   'getHistory',
+  // Sprint: modos, continuidad, subtítulos e historial enriquecido.
+  'getPrefs', 'setContentMode', 'setContinuity', 'getContinuity',
+  'setSubtitlePrefs', 'getSubtitlePrefs', 'getSubtitleTracks', 'setSubtitleTrack',
+  'queryHistory', 'removeFromHistory', 'clearHistory', 'exportHistory',
+  'getSearchHistory', 'removeSearch', 'playHistory',
+  'classify', 'setFilters', 'getFilters',
 ];
 
 const MAX_BODY = 64 * 1024;

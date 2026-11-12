@@ -18,10 +18,20 @@ const SPECIAL_LISTS = [
 
 function emptyData() {
   return {
-    version: 1,
+    version: 2,
     lists: SPECIAL_LISTS.map((l) => ({ ...l, createdAt: new Date().toISOString(), items: [] })),
     queue: { items: [], currentId: null, autoAdvance: true },
     history: [],
+    searchHistory: [],
+    // Preferencias persistentes del reproductor (modo de contenido, mezcla,
+    // continuidad, subtítulos, filtros de búsqueda activos).
+    prefs: {
+      contentMode: 'temas',                    // 'musica' | 'temas' | 'personalizado'
+      mix: { musicPct: 50, musicCount: 0, themeCount: 0 },
+      continuity: { mode: 'continuo', source: 'search' },
+      subtitles: { enabled: true, lang: 'es' },
+      filters: {},
+    },
   };
 }
 
@@ -50,6 +60,18 @@ export class UserStore {
           this.data.queue = { ...emptyData().queue, ...(raw.queue || {}) };
           this.data.lists = Array.isArray(raw.lists) ? raw.lists : emptyData().lists;
           this.data.history = Array.isArray(raw.history) ? raw.history : [];
+          this.data.searchHistory = Array.isArray(raw.searchHistory) ? raw.searchHistory : [];
+          // Migración de esquema: prefs ausentes o incompletas -> valores por defecto.
+          const defPrefs = emptyData().prefs;
+          this.data.prefs = {
+            contentMode: defPrefs.contentMode,
+            mix: { ...defPrefs.mix, ...((raw.prefs && raw.prefs.mix) || {}) },
+            continuity: { ...defPrefs.continuity, ...((raw.prefs && raw.prefs.continuity) || {}) },
+            subtitles: { ...defPrefs.subtitles, ...((raw.prefs && raw.prefs.subtitles) || {}) },
+            filters: ((raw.prefs && raw.prefs.filters) || {}),
+            ...Object.fromEntries(Object.entries(raw.prefs || {}).filter(([k]) => !(k in defPrefs))),
+          };
+          if (raw.version !== 2) this.data.version = 2;
         }
       }
     } catch (e) {
@@ -209,4 +231,19 @@ export class UserStore {
   }
 
   history(limit = 50) { return (this.data.history || []).slice(0, limit); }
+
+  // --- preferencias -----------------------------------------------------------
+  prefs() { return this.data.prefs; }
+
+  setPrefs(patch) {
+    const p = this.data.prefs;
+    if (!p || typeof p !== 'object') this.data.prefs = p = emptyData().prefs;
+    if (patch.contentMode !== undefined) p.contentMode = ['musica', 'temas', 'personalizado'].includes(patch.contentMode) ? patch.contentMode : p.contentMode;
+    if (patch.mix && typeof patch.mix === 'object') p.mix = { ...p.mix, ...patch.mix };
+    if (patch.continuity && typeof patch.continuity === 'object') p.continuity = { ...p.continuity, ...patch.continuity };
+    if (patch.subtitles && typeof patch.subtitles === 'object') p.subtitles = { ...p.subtitles, ...patch.subtitles };
+    if (patch.filters && typeof patch.filters === 'object') p.filters = patch.filters;
+    this.save();
+    return p;
+  }
 }

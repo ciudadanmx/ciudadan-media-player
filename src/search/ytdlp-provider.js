@@ -136,6 +136,9 @@ export function normalizeEntry(entry, providerId = 'ytdlp') {
   };
   if (entry.channel || entry.uploader) item.channel = entry.channel || entry.uploader;
   if (entry.channel_url) item.channelUrl = entry.channel_url;
+  if (entry.channel_id) item.channelId = entry.channel_id;
+  if (entry.uploader_id) item.uploaderId = entry.uploader_id;
+  if (entry.category) item.category = entry.category;
   if (typeof entry.duration === 'number' && entry.duration > 0) item.duration = entry.duration;
   if (typeof entry.view_count === 'number' && entry.view_count >= 0) item.viewCount = entry.view_count;
   const published = publishedFrom(entry);
@@ -148,7 +151,93 @@ export function normalizeEntry(entry, providerId = 'ytdlp') {
   }
   const live = entry.live_status || entry.is_live;
   if (live === 'is_live' || live === 'is_upcoming' || entry.is_live === true) item.isLive = live;
+  // Tipo de resultado (para el filtro de tipo cuando la búsqueda devuelve mezcla).
+  const ie = String(entry.ie_key || '');
+  if (ie === 'YoutubePlaylist') item.type = 'playlist';
+  else if (ie === 'YoutubeTab') item.type = 'channel';
+  else if (item.isLive) item.type = 'live';
+  else if (item.url && /\/shorts\//i.test(item.url)) item.type = 'short';
+  else item.type = 'video';
   return item;
+}
+
+// --- filtros de búsqueda ------------------------------------------------------
+// Códigos "sp" de la página de resultados de YouTube (parámetro de filtro de la
+// propia web). Se aplican en el PROVEEDOR (YouTube filtra de verdad); los que no
+// existen ahí se aplican en local y se marcan con scope:'local'.
+const SP = {
+  type: { video: 'EgIQAQ==', channel: 'EgIQAg==', playlist: 'EgIQAw==', live: 'EgJAAQ==', movie: 'EgIQBA==' },
+  sort: { date: 'CAI==', views: 'CAM==', rating: 'CAE==' },
+  date: { hour: 'EgIIAQ==', today: 'EgIIAg==', week: 'EgIIAw==', month: 'EgIIBA==', year: 'EgIIBQ==' },
+  duration: { short: 'EgIYAw==', medium: 'EgIYAf==', long: 'EgIYAg==' },
+  features: { cc: 'EgIwAQ==', hd: 'EgI4AQ==', '4k': 'EgI4AQE==', live: 'EgJAAQ==', '360': 'EgI4AXAB', hdr: 'EgI4AZgB' },
+};
+
+function ymd(d) {
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Construye los argumentos de yt-dlp para una búsqueda con filtros. */
+export function buildSearchArgs(query, { limit = 20, offset = 0, filters = {} } = {}) {
+  const f = filters || {};
+  const sp = [];
+  if (f.type && f.type !== 'any' && SP.type[f.type]) sp.push(SP.type[f.type]);
+  if (f.sort && f.sort !== 'relevance' && SP.sort[f.sort]) sp.push(SP.sort[f.sort]);
+  if (f.date && f.date !== 'any' && SP.date[f.date]) sp.push(SP.date[f.date]);
+  if (f.duration && f.duration !== 'any' && SP.duration[f.duration]) sp.push(SP.duration[f.duration]);
+  for (const feat of (f.features || [])) if (SP.features[feat]) sp.push(SP.features[feat]);
+
+  const args = ['--no-warnings', '--flat-playlist', '--dump-single-json', '--skip-download'];
+  // Intervalo de fechas personalizado: argumentos del proveedor (no hay sp exacto).
+  if (f.dateFrom) args.push('--dateafter', String(f.dateFrom).replace(/-/g, ''));
+  if (f.dateTo) args.push('--datebefore', String(f.dateTo).replace(/-/g, ''));
+
+  let target;
+  if (sp.length) {
+    // Hay filtros que sólo la página de resultados aplica: se usa su URL con sp.
+    const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query)
+      + '&sp=' + encodeURIComponent(sp.join(''));
+    target = url;
+  } else {
+    // Sin filtros de sp: la ruta clásica ytsearchN (idéntica a la de siempre).
+    target = `ytsearch${offset + limit}:${query}`;
+  }
+  args.push(target);
+  return { args, usedResultsUrl: sp.length > 0 };
+}
+
+/** Post-filtros LOCALES (sobre metadatos ya obtenidos; nunca tocan la red). */
+export function applyLocalFilters(items, filters = {}) {
+  const f = filters || {};
+  let out = items;
+  if (f.type === 'shorts') out = out.filter((it) => it.type === 'short' || (it.url && /\/shorts\//i.test(it.url)));
+  if (f.channel) {
+    const c = String(f.channel).toLowerCase();
+    out = out.filter((it) => (it.channel || '').toLowerCase().includes(c) || (it.channelId || '').toLowerCase() === c);
+  }
+  if (f.duration && f.duration !== 'any') {
+    // Refuerzo local de la duración (por si el sp no vino en la respuesta):
+    // los que no tienen dato real de duración no se descartan.
+    out = out.filter((it) => {
+      const d = Number(it.duration);
+      if (!Number.isFinite(d) || d <= 0) return true;
+      if (f.duration === 'short') return d < 240;
+      if (f.duration === 'medium') return d >= 240 && d <= 1200;
+      if (f.duration === 'long') return d > 1200;
+      return true;
+    });
+  }
+  return out;
+}
+
+export function hasProviderFilters(filters = {}) {
+  const f = filters || {};
+  return !!(f.type && f.type !== 'any' && f.type !== 'shorts' && SP.type[f.type])
+    || !!(f.sort && f.sort !== 'relevance' && SP.sort[f.sort])
+    || !!(f.date && f.date !== 'any' && SP.date[f.date])
+    || !!(f.duration && f.duration !== 'any' && SP.duration[f.duration])
+    || (f.features || []).some((x) => SP.features[x])
+    || f.dateFrom || f.dateTo;
 }
 
 export class YtDlpSearchProvider extends SearchProvider {
@@ -156,31 +245,64 @@ export class YtDlpSearchProvider extends SearchProvider {
   get name() { return 'YouTube (yt-dlp)'; }
   get capabilities() {
     return {
-      // Sólo se declaran los filtros que el proveedor puede aplicar DE VERDAD
-      // sobre los datos que devuelve: la búsqueda ligera de yt-dlp no trae
-      // fecha de publicación (no se inventa ni se simula ese filtro), pero sí
-      // trae la duración real de cada vídeo.
+      // Sólo se declaran filtros con implementación REAL. scope:'provider' =
+      // lo aplica YouTube/yt-dlp en la propia consulta; scope:'local' = se
+      // filtra sobre los metadatos devueltos (se marca en la interfaz).
       filters: [
-        { id: 'duration', name: 'Duración', options: [
+        { id: 'type', name: 'Tipo', scope: 'provider', options: [
           { id: 'any', name: 'Cualquiera' },
-          { id: 'short', name: 'Corto (<4 min)' },
-          { id: 'medium', name: 'Medio (4-20 min)' },
-          { id: 'long', name: 'Largo (>20 min)' },
+          { id: 'video', name: 'Vídeos' },
+          { id: 'channel', name: 'Canales' },
+          { id: 'playlist', name: 'Listas de reproducción' },
+          { id: 'live', name: 'Directos' },
+          { id: 'shorts', name: 'Shorts', scope: 'local', note: 'detectados por la URL /shorts/' },
         ] },
+        { id: 'date', name: 'Fecha de publicación', scope: 'provider', options: [
+          { id: 'any', name: 'Cualquiera' },
+          { id: 'hour', name: 'Última hora' },
+          { id: 'today', name: 'Hoy' },
+          { id: 'week', name: 'Esta semana' },
+          { id: 'month', name: 'Este mes' },
+          { id: 'year', name: 'Este año' },
+        ], customRange: true }, // intervalo personalizado vía --dateafter/--datebefore
+        { id: 'duration', name: 'Duración', scope: 'provider', options: [
+          { id: 'any', name: 'Cualquiera' },
+          { id: 'short', name: 'Menos de 4 min' },
+          { id: 'medium', name: '4–20 min' },
+          { id: 'long', name: 'Más de 20 min' },
+        ] },
+        { id: 'features', name: 'Características', scope: 'provider', multiple: true, options: [
+          { id: 'cc', name: 'Con subtítulos' },
+          { id: 'hd', name: 'HD (720p+)' },
+          { id: '4k', name: '4K (aprox.)', note: 'la API no garantiza 4K exacto' },
+          { id: 'live', name: 'En directo' },
+          { id: '360', name: '360°' },
+          { id: 'hdr', name: 'HDR' },
+        ] },
+        { id: 'sort', name: 'Ordenar por', scope: 'provider', options: [
+          { id: 'relevance', name: 'Relevancia' },
+          { id: 'date', name: 'Fecha' },
+          { id: 'views', name: 'Visualizaciones' },
+          { id: 'rating', name: 'Valoración' },
+        ] },
+        { id: 'channel', name: 'Canal específico', scope: 'local', text: true },
       ],
-      // El proveedor devuelve los resultados ordenados por relevancia de YouTube.
-      sort: [{ id: 'relevance', name: 'Relevancia' }],
       details: true,
       pagination: true,
     };
   }
 
-  async search(query, { limit = 20, offset = 0, signal = null, cancelPrevious = true } = {}) {
+  /**
+   * Búsqueda ligera con filtros opcionales.
+   * opts.filters: { type, date, dateFrom, dateTo, duration, features:[], sort, channel }
+   */
+  async search(query, { limit = 20, offset = 0, signal = null, cancelPrevious = true, filters = null } = {}) {
     const q = String(query || '').trim();
     if (!q) return { items: [], hasMore: false };
     const n = Math.max(1, Math.min(50, Number(limit) || 20));
     const off = Math.max(0, Number(offset) || 0);
-    const cacheKey = `${q}|${n}|${off}`;
+    const fKey = filters ? JSON.stringify(filters) : '';
+    const cacheKey = `${q}|${n}|${off}|${fKey}`;
     const cached = this._cache.get(cacheKey);
     if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
       return { ...cached.value, cached: true };
@@ -192,11 +314,15 @@ export class YtDlpSearchProvider extends SearchProvider {
     if (cancelPrevious) { if (activeSearch) { try { activeSearch.abort(); } catch {} } }
     const ctrl = new AbortController();
     activeSearch = ctrl;
+    if (signal) signal.addEventListener('abort', () => { try { ctrl.abort(); } catch {} }, { once: true });
 
     try {
       // Búsqueda ligera: no resuelve formatos ni descarga nada.
-      const target = `ytsearch${off + n}:${q}`;
-      const args = ['--no-warnings', '--flat-playlist', '--dump-single-json', '--skip-download', target];
+      const built = buildSearchArgs(q, { limit: n, offset: off, filters: filters || {} });
+      const args = built.args;
+      const usedResultsUrl = built.usedResultsUrl;
+      // El target (ytsearchN:... o la URL de resultados) es el ÚLTIMO argumento.
+      const target = args[args.length - 1];
       let json = null; let lastErr = null;
       const deadline = Date.now() + SEARCH_DEADLINE_MS;
       try {
@@ -209,26 +335,39 @@ export class YtDlpSearchProvider extends SearchProvider {
           if (Date.now() > deadline) break;   // no se encadena reintentos eternos
           const left = Math.max(15000, deadline - Date.now());
           try {
-            json = await runYtdlp(
-              ['--no-warnings', '--flat-playlist', '--dump-single-json', '--skip-download',
-                '--extractor-args', `youtube:player_client=${client}`, target],
-              { timeoutMs: Math.min(SEARCH_TIMEOUT_MS, left), signal: ctrl.signal },
-            );
+            const retryArgs = args.slice(0, -1);
+            retryArgs.push('--extractor-args', `youtube:player_client=${client}`, target);
+            json = await runYtdlp(retryArgs, { timeoutMs: Math.min(SEARCH_TIMEOUT_MS, left), signal: ctrl.signal });
             lastErr = null;
             break;
           } catch (e2) { lastErr = e2; }
         }
       }
       if (!json) throw lastErr || new Error('búsqueda sin resultados');
-      const entries = Array.isArray(json.entries) ? json.entries : [];
-      const items = entries.map((e) => normalizeEntry(e, this.id)).filter(Boolean);
-      const out = { items: items.slice(off, off + n), hasMore: entries.length >= off + n };
+      const entries = Array.isArray(json.entries) ? json.entries : (json.id ? [json] : []);
+      let items = entries.map((e) => normalizeEntry(e, this.id)).filter(Boolean);
+      // Filtros locales (shorts por URL, canal, duración de respaldo).
+      if (filters) items = applyLocalFilters(items, filters);
+      const hasMore = usedResultsUrl ? entries.length >= n : entries.length >= off + n;
+      const out = { items: items.slice(off, off + n), hasMore };
       this._cache.set(cacheKey, { at: Date.now(), value: out });
       if (this._cache.size > CACHE_MAX) this._cache.delete(this._cache.keys().next().value);
       return out;
     } finally {
       if (activeSearch === ctrl) activeSearch = null;
     }
+  }
+
+  /** Lista plana de una URL (p.ej. /channel/UC.../videos) sólo con metadatos. */
+  async fetchFlat(url, { limit = 20, signal = null } = {}) {
+    const u = String(url || '').trim();
+    if (!/^https?:/i.test(u)) throw new Error('URL no válida');
+    const n = Math.max(1, Math.min(50, Number(limit) || 20));
+    const args = ['--no-warnings', '--flat-playlist', '--dump-single-json', '--skip-download', u];
+    const json = await runYtdlp(args, { timeoutMs: SEARCH_TIMEOUT_MS, signal });
+    const entries = Array.isArray(json.entries) ? json.entries : [];
+    const items = entries.map((e) => normalizeEntry(e, this.id)).filter(Boolean);
+    return { items: items.slice(0, n), hasMore: entries.length > n };
   }
 
   async details(idOrUrl) {

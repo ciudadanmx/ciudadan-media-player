@@ -525,3 +525,106 @@ data: {"type":"volumeChanged","playerId":"ciudadan-media-main","stateVersion":58
   explorador están ya separados (`explorer-utils.js`, `explorer-results.js`, `explorer-lists.js`,
   `explorer.js`) para montarlos allí sin duplicar interfaz.
 
+---
+
+## 8. Sprint: reproducción inteligente, subtítulos, búsqueda avanzada e historial persistente
+
+Añadido sobre lo existente **sin eliminar ni degradar nada** (las suites anteriores siguen en verde:
+`test-control-api` 25/25, `test-yt-controls` 25/25, `test-search` 16/16). Un único reproductor
+libVLC; todo persiste en `data/ciudadan-media-store.json` (migración automática de esquema v1→v2,
+sin pérdida de datos; nunca `localStorage` como almacén principal).
+
+### 8.1 Qué se añadió
+
+- **Modos de contenido** en el explorador: `[Música] [Temas] [Personalizado]`.
+  - *Personalizado*: slider 0–100 % de música con % complementario automático, cantidades
+    opcionales por ciclo (2 música / 1 tema ≈ 67/33 coherente con el slider), vista previa,
+    presets 50/50 · 70/30 · 30/70, aplicar/restablecer. La mezcla usa **Bresenham ponderado**
+    (`src/mix.js`): 70/30 produce exactamente el 70,00 % a 1000 selecciones, sin rachas largas
+    del mismo tipo (máx. 3 seguidas a 70/30), con saldo acumulado y recuperación progresiva
+    cuando falta una categoría. La **cola manual siempre gana**.
+  - Clasificación por categorías/metadatos de yt-dlp (`src/classifier.js`), sin IA.
+- **Continuidad** (`[Solo este] [Continuo]` en la barra): al terminar, prioridad
+  cola manual → cola automática preparada (≤3 candidatos desde metadatos) → descubrimiento
+  (fuente: Mi búsqueda / Mismo canal / Explorar tema / Descubrimiento; el tema sale de
+  metadatos/palabras clave, **no** de `relatedToVideoId`). Los errores nunca detienen la
+  reproducción y no hay transiciones END duplicadas. Verificado en real: `solo` no avanza;
+  `continuo` avanza solo al terminar (zoo → siguiente vídeo, `playing`).
+- **Subtítulos reales (CC)** con libVLC, no IFrame: botón `[CC]` + selector de idioma en la
+  barra; descarga la pista preferida (es → en) de los metadatos de yt-dlp a `.vtt` local y la
+  engancha con `:input-slave=file:///...` (con streams HTTP `sub-file=` **no** engancha;
+  verificado con sonda), selecciona la pista SPU real tras el parse con
+  `libvlc_video_set_spu` y permite desactivarla (-1). Preferencias persistentes.
+  Verificado en la app real: `getSubtitleTracks` → pista real `id=2` seleccionable y
+  `setSubtitleTrack(-1)` → `selected=-1` en `/state`.
+- **Búsqueda avanzada** (`[Filtros]`): popover construido desde las `capabilities` reales del
+  proveedor — tipo (los shorts se marcan como filtro **local**), fecha (incl. rango
+  personalizado vía `--dateafter/--datebefore`), duración, características (CC/HD/SD/licencia/
+  en vivo), orden, canal/idioma/región/embeddable; cada control etiqueta si es del **proveedor**
+  (parámetro `sp` de YouTube) o **local**; debounce, badge con nº de activos, restablecer,
+  persistencia, navegación por teclado y cierre con clic fuera/Escape.
+- **Historial persistente** (`[Historial]`): esquema rico por reproducción
+  (`provider:sourceId`, título, canal, miniatura, url, duración, firstPlayedAt/lastPlayedAt,
+  playCount, positionMs, estado started/partial/finished, clasificación, contexto de búsqueda).
+  Guardado con throttle (mín. 4 s) + forzado en pausa/stop/seek/cierre; **reanuda desde la
+  última posición**; panel con pestañas Todos/Música/Temas/Pendientes/Terminados, búsqueda
+  **100 % local** en vivo, filtros, orden, paginación (30/vista, límite 200 en API), acciones
+  (▶ reproducir, ⏩ continuar, ➕ cola, 🔍 relacionados, 🔁 repetir, 🗑 borrar), limpiar por
+  período, limpiar todo con confirmación y **exportar JSON**. Historial de búsquedas aparte
+  (consulta/fecha/filtros/modo/resultados, recientes, repetir, deduplicado, local).
+- **Rendimiento**: un solo player (nunca se recrea al cambiar filtros/prefs), sin red
+  periódica durante la reproducción (sólo sondeo local del motor), escrituras de historial
+  con throttle, miniaturas lazy, búsquedas con debounce y cancelación de las obsoletas,
+  descubrimiento sólo al terminar.
+
+### 8.2 Archivos nuevos / tocados del sprint
+
+| Archivo | Aporte |
+|---|---|
+| `src/classifier.js` | Clasificación música/tema por metadatos (categoría, título, canal VEVO/Topic/…) |
+| `src/mix.js` | Mezcla personalizada Bresenham ponderada (ratio exacto, anti-rachas, recuperación) |
+| `src/history.js` | Historial de reproducción + historial de búsquedas (throttle, migración, búsqueda local, export) |
+| `src/discovery.js` | Temas desde metadatos y candidatos de descubrimiento por fuente |
+| `src/continuity.js` | Motor de continuidad (solo/continuo, prioridades, dedupe de END, tolerante a errores) |
+| `src/subtitles.js` | Selección/descarga de pistas .vtt (con "warm read" anti-AV) y limpieza |
+| `src/store.js` | Esquema v2: `prefs` (contentMode, mix, continuity, subtitles, filters) + `searchHistory` |
+| `src/resolver.js`, `src/search/ytdlp-provider.js` | Metadatos enriquecidos; filtros `sp` de proveedor + filtros locales (duración, shorts, canal) |
+| `src/vlc.js` | SPU real: `getSubtitleTracks` (lista enlazada koffi, struct a nivel de módulo), `setSubtitleTrack`, `getSpuCountRaw` |
+| `src/main.js`, `src/control-api.js`, `src/preload.cjs` | Nuevos comandos API/IPC (`getPrefs`, `setContentMode`, `setContinuity`, `setSubtitlePrefs`, `getSubtitleTracks`, `setSubtitleTrack`, `queryHistory`, `playHistory`, `classify`, `setFilters`, …); `/state` expone los 5 campos del sprint |
+| `renderer/search/explorer-sprint.js` | UI del sprint: modos, popover de mezcla, popover de filtros, panel de historial |
+| `renderer/search/explorer.js`, `explorer-utils.js`, `explorer.css` | Integración (botones Filtros/Historial, pestaña Historial, filtros por modo, insignias de clase) |
+| `renderer/yt-controls.html`, `yt-controls.js` | Botones `[CC]`+idioma+`[Solo/∞]`+fuente en la barra con sus popovers |
+| `tools/test-services.mjs` | **57/57 PASS** — unitarias de classifier, mix (70/30 exacto, maxRun, fallback/recuperación), history, continuity, discovery, filtros sp/local |
+| `tools/test-sprint-ui.mjs` | **40/40 PASS** — integración real con app viva: reproducción verificada, solo/continuo, CC SPU real, historial/playHistory, filtros persistentes, UI vía CDP |
+| `tools/probe-spu.mjs` | Sonda aislada de libVLC (file:// vs HTTP; demostró `input-slave` y el fix de `koffi.address`/decode) |
+| `tools/final-check.mjs` | Verificación final: `playing` con posición avanzando (0→4200 ms) y volumen 100 vía API |
+
+### 8.3 Resultados de pruebas reales (12/11/2026)
+
+| Suite | Resultado |
+|---|---|
+| `node tools\test-services.mjs` | **57/57 PASS** |
+| `node tools\test-sprint-ui.mjs` | **40/40 PASS** (exit 0) — incluye CC SPU real en reproducción (`selected=2` pista real, `-1` desactiva), avance continuo real (zoo → siguiente), modo solo sin avance, historial persistente + búsqueda local + export, `playHistory` sin duplicar (playCount +1), filtros sp persistentes, UI completa vía CDP |
+| `node tools\test-control-api.mjs` | **25/25 PASS** (sin regresión) |
+| `node tools\test-yt-controls.mjs` | **25/25 PASS** (sin regresión) |
+| `node tools\test-search.mjs` | **16/16 PASS** (sin regresión) |
+| `node tools\final-check.mjs` | **PASS** — `playing`, posición 0→4200 ms avanzando, `volumen=100` vía API |
+
+### 8.4 Limitaciones reales de YouTube/yt-dlp/libVLC (no disimuladas)
+
+- Los **shorts** no tienen parámetro `sp` propio en la búsqueda de resultados: se filtran en
+  **local** por `/shorts/` en la URL y se marcan como tales en la UI.
+- Los filtros de resolución (4K/HDR/360) son aproximados (`sp` de YouTube); la duración se aplica
+  siempre en local además del `sp`.
+- Con streams HTTP, la opción `:sub-file=` de libVLC **no engancha** la pista externa: hay que
+  usar `:input-slave=file:///...` (verificado con `tools/probe-spu.mjs`).
+- Las pistas SPU aparecen sólo tras el parse del medio (sondeo con reintentos en la barra).
+- El nombre de la pista externa en VLC en español es genérico ("Pista 1"): el idioma se conoce
+  por la descarga, no por el nombre de la pista.
+- Un `.vtt` recién creado lo escanea el antivirus en el primer acceso; si libVLC lo abre antes,
+  el slave no engancha: se "calienta" el fichero con una lectura async tras escribirlo.
+- yt-dlp puede tardar >90 s en búsquedas con `sp` en este entorno (reintentos con otros
+  clientes); la ruta `sp` está cubierta por pruebas unitarias cuando la red es lenta.
+- TTS/STT, DSH1/DSH2 y todas las funciones previas siguen intactos (hash de `AGENTS.md`
+  sin cambios en cada suite; sólo se añade al ledger espejo append-only).
+

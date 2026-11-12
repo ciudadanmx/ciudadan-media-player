@@ -16,6 +16,12 @@ import { UserStore, FAVORITES_LIST_ID, WATCH_LATER_LIST_ID } from './store.js';
 import { QueueManager } from './queue.js';
 import { SearchRegistry } from './search/provider.js';
 import { YtDlpSearchProvider } from './search/ytdlp-provider.js';
+import { classifyItem } from './classifier.js';
+import { MixScheduler } from './mix.js';
+import { HistoryRepository } from './history.js';
+import { DiscoveryService } from './discovery.js';
+import { ContinuityEngine } from './continuity.js';
+import { pickTrack, downloadSubtitle, subtitleTracksFromInfo, subsDir, cleanupSubtitles, DEFAULT_SUB_LANGS } from './subtitles.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -86,8 +92,33 @@ const queue = new QueueManager(store);
 // Proveedores de búsqueda (hoy: YouTube vía yt-dlp; mañana caben más).
 const searchRegistry = new SearchRegistry();
 searchRegistry.register(new YtDlpSearchProvider());
+// --- Servicios reutilizables del sprint (desacoplados de la UI) ---------------
+// HistoryRepository: historial persistente de reproducciones y búsquedas.
+const historyRepo = new HistoryRepository(store, { log });
+// MixScheduler: rotación ponderada Música/Temas (modo personalizado).
+const mix = new MixScheduler({ musicPct: store.prefs().mix.musicPct ?? 50 });
+// DiscoveryService: candidatos de continuidad sólo con metadatos.
+const discovery = new DiscoveryService({
+  search: (q, opts) => searchRegistry.default().search(q, opts),
+  fetchFlat: (u, opts) => searchRegistry.default().fetchFlat(u, opts),
+  log,
+});
+// ContinuityEngine: decide el siguiente contenido al finalizar.
+const continuity = new ContinuityEngine({
+  queue, discovery, mix,
+  onPlay: (item, origin) => playMediaItem(item, origin || 'system'),
+  log,
+});
+// Aplica las preferencias persistentes a los servicios.
+continuity.setMode(store.prefs().continuity.mode === 'solo' ? 'solo' : 'continuo');
+continuity.setSource(store.prefs().continuity.source || 'search');
+continuity.setContentMode(store.prefs().contentMode || 'temas', store.prefs().mix);
+// Última búsqueda activa (fuente "Mi búsqueda" de la continuidad) y su contexto.
+let lastSearchQuery = '';
+let lastSearchFilters = null;
 log('almacenamiento:', STORE_FILE, '| listas:', store.lists().map((l) => l.name).join(', '));
 log('proveedores de búsqueda:', searchRegistry.list().map((p) => p.id).join(', '));
+log('prefs:', JSON.stringify(store.prefs()));
 
 // --- Barra flotante estilo YouTube sobre el vídeo -----------------------------
 // La ventana de vídeo pinta con libVLC sobre un HWND nativo: el DOM no puede
@@ -254,6 +285,7 @@ function getState() {
   const fs = fullscreenNow();
   const pl = { playlistIndex: currentPlaylistIndex, playlistLength: PLAYLIST.length };
   if (!vlc || !vlc.player) {
+    const prefs = store.prefs();
     return {
       playerId: PLAYER_ID, state: 0, stateName: 'Idle', status: engineReady ? 'idle' : 'preparing',
       time: 0, length: 0, position: 0, duration: 0,
@@ -261,6 +293,11 @@ function getState() {
       seekable: false, fullscreen: fs,
       title: currentTitle, mode: currentMode, error: currentError,
       videoId: currentId, url: currentUrl, connected: !!api, stateVersion, ...pl,
+      contentMode: prefs.contentMode,
+      mix: prefs.mix,
+      continuity: { mode: continuity.mode, source: continuity.source, autoQueue: continuity.autoQueue.length },
+      subtitles: { enabled: prefs.subtitles.enabled !== false, lang: prefs.subtitles.lang, selected: -1 },
+      filters: prefs.filters || {},
     };
   }
   const st = vlc.getState();
@@ -269,6 +306,7 @@ function getState() {
   const volume = vlc.getVolume();
   const muted = vlc.getMute();
   lastVolume = volume; lastMute = muted;
+  const prefs = store.prefs();
   return {
     playerId: PLAYER_ID,
     state: st, stateName: STATE_NAMES[st] || '?', status: statusOf(st),
@@ -278,6 +316,12 @@ function getState() {
     seekable: length > 0, fullscreen: fs,
     title: currentTitle, mode: currentMode, error: currentError,
     videoId: currentId, url: currentUrl, connected: true, stateVersion, ...pl,
+    // --- sprint: continuidad, modo de contenido y subtítulos (solo lectura) ---
+    contentMode: prefs.contentMode,
+    mix: prefs.mix,
+    continuity: { mode: continuity.mode, source: continuity.source, autoQueue: continuity.autoQueue.length },
+    subtitles: { enabled: prefs.subtitles.enabled !== false, lang: prefs.subtitles.lang, selected: vlc._last.spu ?? -1 },
+    filters: prefs.filters || {},
   };
 }
 
@@ -303,6 +347,12 @@ function apiStateFrom(s) {
     stateVersion,
     error: s.error || null,
     libvlcState: s.stateName,
+    // --- sprint (sólo lectura, additive: el contrato anterior no cambia) ---
+    contentMode: s.contentMode,
+    mix: s.mix,
+    continuity: s.continuity,
+    subtitles: s.subtitles,
+    filters: s.filters,
   };
 }
 
@@ -319,6 +369,10 @@ let currentMode = null;
 let currentError = null;
 let currentId = null;
 let currentUrl = '';
+// Metadatos del medio actual (para continuidad "mismo canal" / "tema").
+let currentChannel = null;
+let currentChannelId = null;
+let currentChannelUrl = null;
 // Índice actual dentro de la lista hardcodeada (src/playlist.js).
 let currentPlaylistIndex = 0;
 // Control API local (coordinador Node.js) y control de estado.
@@ -344,6 +398,16 @@ let engineReady = false;
 let engineReadyPromise = null;
 let resolveEngineReady = null;
 const recentEvents = [];
+let pollTick = 0;
+// Guarda la posición actual en el historial de inmediato (pausa, stop, cambio
+// de medio, cierre controlado): force=true salta el throttle del repositorio.
+function saveProgressNow() {
+  try {
+    if (vlc && vlc.player && currentId) {
+      historyRepo.updateProgress(currentId, vlc.getTime() || 0, vlc.getLength() || 0, { force: true });
+    }
+  } catch {}
+}
 
 // Carga (o recarga) de una URL de YouTube: resuelve con yt-dlp y arranca libVLC.
 // Se ejecuta EN SERIE: si dos cargas llegan a la vez (API + botón + autoavance),
@@ -360,6 +424,7 @@ async function loadUrl(url, origin = 'user') {
 async function loadUrlInner(url, origin = 'user') {
   try {
     log('load:', url);
+    saveProgressNow();          // al cambiar de medio se guarda la posición del anterior
     intentionalStop = false;   // una carga nueva siempre es intencionada
     intentionalPause = false;
     // Si el motor todavía se está preparando (arranque en segundo plano), se
@@ -374,17 +439,36 @@ async function loadUrlInner(url, origin = 'user') {
     const entry = await resolveYouTube(url);
     currentTitle = entry.title; currentMode = entry.mode; currentError = entry.errors?.join('; ') || null; currentId = entry.id;
     currentUrl = url;
+    currentChannel = entry.channel || null;
+    currentChannelId = entry.channelId || null;
+    currentChannelUrl = entry.channelUrl || null;
     // Si la URL cargada es un elemento de la lista, se marca como actual.
     const plIdx = PLAYLIST.findIndex((it) => it.url === url || (entry.id && it.id === entry.id));
     if (plIdx >= 0) currentPlaylistIndex = plIdx;
-    // Historial local de reproducciones y posición actual de la cola.
+    // Historial local de reproducciones (entrada rica: clasificación + contexto).
     const ytId = videoIdOf(url);
-    store.addHistory({ id: ytId, title: entry.title, url, duration: entry.duration || null });
+    const cls = classifyItem({ title: entry.title, channel: entry.channel, category: entry.category });
+    const histEntry = historyRepo.recordPlay(
+      { id: ytId, provider: 'ytdlp', title: entry.title, url, duration: entry.duration || null, channel: entry.channel, thumbnail: null, category: entry.category },
+      { context: lastSearchQuery || null, classification: cls },
+    );
     queue.setCurrent(ytId);
     if (entry.errors?.length) log('avisos del resolver:', entry.errors.join(' || '));
     proxy.register(entry);
     const streamUrl = proxy.streamUrl(entry.id);
     log(`resuelto: modo=${entry.mode} client=${entry.client} format=${entry.formatId} res=${entry.resolution} -> ${streamUrl}`);
+    // --- Subtítulos externas (preferencia persistida) --------------------------
+    // Se descargan en segundo plano con timeout corto: NUNCA retrasan el play.
+    const subPrefs = store.prefs().subtitles || { enabled: true, lang: 'es' };
+    let subtitleFile = null;
+    if (subPrefs.enabled !== false && Array.isArray(entry.subtitleTracks) && entry.subtitleTracks.length) {
+      const track = pickTrack(entry.subtitleTracks, [subPrefs.lang || 'es', ...DEFAULT_SUB_LANGS]);
+      if (track) {
+        subtitleFile = await downloadSubtitle(track, subsDir(process.env.CMP_TMPDIR || path.join(ROOT, '.tmp')), { timeoutMs: 4000 });
+        if (subtitleFile) log('subtítulos: pista', track.lang, '->', subtitleFile);
+        else log('subtítulos: no se pudo descargar la pista', track.lang, '(se reproduce sin CC)');
+      }
+    }
     // La ventana de video puede haberse cerrado mientras se resolvia la URL
     // (tarda ~4 s). En ese caso no se puede embeber libVLC: se avisa claro.
     if (!winVideo || winVideo.isDestroyed()) {
@@ -398,10 +482,47 @@ async function loadUrlInner(url, origin = 'user') {
     // medio viejo, que son provocados por nosotros.
     switchingMedia = true;
     try { proxy.abortAll(); } catch {}
+    const mediaOptions = [':network-caching=1200'];
+    // OJO: con streams HTTP (nuestro proxy) ":sub-file=" NO engancha la pista;
+    // hay que usar ":input-slave=file:///..." (verificado con sonda sobre HTTP).
+    if (subtitleFile) {
+      const fwd = subtitleFile.split('\\').join('/');
+      const slave = /^[A-Za-z]:\//.test(fwd) ? 'file:///' + fwd : 'file://' + fwd;
+      mediaOptions.push(':input-slave=' + slave);
+    }
     // vlc.play() es asíncrono: no bloquea el hilo principal aunque stop()/
     // play() tarden dentro de libVLC (antes esto congelaba toda la app).
-    await vlc.play(streamUrl, { hwnd: hwndBuf, mediaOptions: [':network-caching=1200'] });
+    await vlc.play(streamUrl, { hwnd: hwndBuf, mediaOptions });
     switchingMedia = false;
+    // Tras arrancar, seleccionar la pista de subtítulos preferida si hay varias.
+    if (subPrefs.enabled !== false) {
+      try {
+        const tracks = (await vlc.getSubtitleTracks()).filter((t) => t.id >= 0); // id -1 = "Deshabilitar"
+        if (tracks.length > 1) {
+          const want = String(subPrefs.lang || 'es').toLowerCase();
+          const match = tracks.find((t) => String(t.name || '').toLowerCase().includes(want))
+            || tracks.find((t) => /spanish|español/i.test(t.name || ''));
+          if (match) await vlc.setSubtitleTrack(match.id);
+        } else if (tracks.length === 1) {
+          await vlc.setSubtitleTrack(tracks[0].id);
+        }
+      } catch (e) { log('subtítulos: no se pudo seleccionar pista:', String(e.message || e)); }
+    }
+    // Reanudar desde la última posición guardada (sólo si quedó a medias).
+    if (histEntry && histEntry.status === 'partial' && histEntry.positionMs > 15000) {
+      const posMs = histEntry.positionMs;
+      setTimeout(() => {
+        vlc?.setTime(posMs).then(() => log('historial: reanudado en', Math.round(posMs / 1000) + 's')).catch(() => {});
+      }, 1500);
+    }
+    // Diagnóstico SPU (una vez por carga): ¿el slave de subtítulos enganchó?
+    setTimeout(async () => {
+      try {
+        const raw = await vlc.getSpuCountRaw();
+        const tr = await vlc.getSubtitleTracks();
+        log('spu check: rawCount=' + raw + ' tracks=' + tr.length, JSON.stringify(tr), 'opts=', JSON.stringify(mediaOptions));
+      } catch (e) { log('spu check error:', String(e.message || e)); }
+    }, 6000);
     // lastStatus lo actualiza scheduleEngineSync() cuando el motor confirme.
     const st = notifyChange(origin, 'load');
     emitEvent('mediaChanged', { videoId: entry.id, title: entry.title, url, mode: entry.mode, state: st }, origin);
@@ -458,16 +579,15 @@ function scheduleEngineSync() {
     else if (status === 'stopped') emitEvent('playbackStopped', { state: s }, 'system');
     else if (status === 'ended') {
       emitEvent('playbackEnded', { state: s }, 'system');
-      // Autoavance: si la cola está activada y hay siguiente, se reproduce.
-      // Sólo cuando el medio estaba reproduciendo (fin real, no un stop).
-      if (prev === 'playing' && queue.autoAdvance && queue.items.length && queue.currentIndex >= 0) {
-        const nextItem = queue.nextItem();
-        if (nextItem) {
-          log('AUTOAVANCE: cola -> siguiente', nextItem.title || nextItem.id);
-          setTimeout(() => {
-            playMediaItem(nextItem, 'system').catch((e) => log('ERROR autoavance:', String(e.message || e)));
-          }, 400);
-        }
+      // Continuidad: decide el motor (solo/continuo + fuente). Un END duplicado
+      // se ignora dentro del motor (dedupe) y la cola manual tiene prioridad.
+      //Sólo cuando el medio estaba reproduciendo (fin real, no un stop).
+      if (prev === 'playing') {
+        try {
+          historyRepo.markFinished(currentId);
+          continuity.handleEnded({ current: { id: currentId, title: currentTitle, url: currentUrl, channel: currentChannel, channelId: currentChannelId, channelUrl: currentChannelUrl }, searchQuery: lastSearchQuery })
+            .catch((e) => log('ERROR continuidad:', String(e.message || e)));
+        } catch (e) { log('ERROR continuidad:', String(e.message || e)); }
       }
     }
     else if (status === 'error') emitEvent('playerError', { error: currentError || 'error del motor', state: s }, 'system');
@@ -549,6 +669,7 @@ async function applySeek(seconds, origin, reason = 'seek') {
   if (!Number.isFinite(t) || t < 0) throw new Error('posicion invalida: ' + seconds);
   if (len > 0) t = Math.min(t, len / 1000);
   await vlc.setTime(Math.round(t * 1000));
+  saveProgressNow(); // el salto cambia la posición guardada: se persiste ya
   // Se espera a que el motor confirme la nueva posición (con refresco asíncrono).
   const ok = await waitFor(async () => { await vlc.sync(); return Math.abs(vlc.getTime() / 1000 - t) < 2.5; }, 4000, 150);
   const st = notifyChange(origin, reason);
@@ -561,7 +682,7 @@ async function applySeek(seconds, origin, reason = 'seek') {
 // si dos "load"/"next" llegan a la vez, libVLC recibiría dos cambios de medio
 // cruzados y el motor se queda inconsistente (vídeo en negro o estado
 // incoherente). El resto de órdenes (volumen, pausa, seek) pueden coexistir.
-const MEDIA_COMMANDS = new Set(['load', 'reload', 'next', 'previous', 'playList', 'playQueueIndex', 'stop']);
+const MEDIA_COMMANDS = new Set(['load', 'reload', 'next', 'previous', 'playList', 'playQueueIndex', 'stop', 'playHistory']);
 let mediaChain = Promise.resolve();
 function serializeMedia(fn) {
   const next = mediaChain.then(fn, fn);
@@ -612,12 +733,14 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
       await vlc.setPaused(true);
       const ok = await waitState(() => vlc.getState() === 4, 2000);
       if (!ok) throw new Error('el motor no confirmo la pausa');
+      saveProgressNow();
       const st = notifyChange(origin, 'pause');
       return { result: { paused: true }, state: st };
     }
     case 'stop': {
       if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
       intentionalStop = true;   // el usuario paró: la vigilancia no debe recargar
+      saveProgressNow();
       await vlc.stop();
       const ok = await waitState(() => vlc.getState() === 5 || vlc.getTime() === 0, 2500);
       if (!ok) throw new Error('el motor no confirmo el stop');
@@ -693,9 +816,17 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
       const q = String(a.query || a.q || '').trim();
       const limit = clamp(Math.trunc(toNum(a.limit, 20)), 1, 50);
       const offset = Math.max(0, Math.trunc(toNum(a.offset, 0)));
+      const filters = (a.filters && typeof a.filters === 'object') ? a.filters : null;
       const provider = searchRegistry.get(a.provider);
-      const res = await provider.search(q, { limit, offset, cancelPrevious: a.cancelPrevious !== false });
-      return { result: { query: q, provider: provider.id, ...res }, state: apiState() };
+      const res = await provider.search(q, { limit, offset, cancelPrevious: a.cancelPrevious !== false, filters });
+      // La búsqueda activa alimenta la continuidad ("Mi búsqueda") y el
+      // historial de búsquedas (local, sin red adicional).
+      if (q) {
+        lastSearchQuery = q;
+        lastSearchFilters = filters;
+        try { historyRepo.recordSearch({ query: q, filters: filters || {}, mode: store.prefs().contentMode || 'temas' }); } catch {}
+      }
+      return { result: { ok: true, query: q, provider: provider.id, ...res }, state: apiState() };
     }
     case 'searchDetails': {
       const provider = searchRegistry.get(a.provider);
@@ -823,7 +954,125 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
       return { result: { added: items.length, queue: queue.snapshot() }, state: apiState() };
     }
     case 'getHistory': {
+      const q = a.q !== undefined ? String(a.q) : '';
+      if (q || a.tab || a.sort || a.offset !== undefined || a.period || a.source || a.channel) {
+        return { result: { ...historyRepo.query({
+          q, tab: a.tab, sort: a.sort, offset: toNum(a.offset, 0),
+          limit: clamp(Math.trunc(toNum(a.limit, 30)), 1, 200),
+          period: a.period, source: a.source, channel: a.channel,
+        }) }, state: apiState() };
+      }
       return { result: { history: store.history(clamp(Math.trunc(toNum(a.limit, 50)), 1, 200)) }, state: apiState() };
+    }
+    // --- Preferencias y modos del sprint ---------------------------------------
+    case 'getPrefs': {
+      return { result: { prefs: store.prefs(), continuity: continuity.snapshot() }, state: apiState() };
+    }
+    case 'setContentMode': {
+      const mode = String(a.mode || '');
+      const p = store.setPrefs({ contentMode: mode, ...(a.mix ? { mix: a.mix } : {}) });
+      continuity.setContentMode(p.contentMode, p.mix);
+      log('modo de contenido:', p.contentMode, JSON.stringify(p.mix));
+      const st = notifyChange('api', 'contentMode');
+      return { result: { prefs: p, continuity: continuity.snapshot() }, state: st };
+    }
+    case 'setContinuity': {
+      const p = store.setPrefs({ continuity: {
+        mode: a.mode !== undefined ? a.mode : store.prefs().continuity.mode,
+        source: a.source !== undefined ? a.source : store.prefs().continuity.source,
+      } });
+      continuity.setMode(p.continuity.mode);
+      continuity.setSource(p.continuity.source);
+      log('continuidad:', JSON.stringify(p.continuity));
+      const st = notifyChange('api', 'continuity');
+      return { result: { prefs: p, continuity: continuity.snapshot() }, state: st };
+    }
+    case 'getContinuity': {
+      return { result: { continuity: continuity.snapshot(), prefs: store.prefs().continuity }, state: apiState() };
+    }
+    case 'setSubtitlePrefs': {
+      const p = store.setPrefs({ subtitles: {
+        enabled: a.enabled !== undefined ? !!a.enabled : store.prefs().subtitles.enabled,
+        lang: a.lang !== undefined ? String(a.lang) : store.prefs().subtitles.lang,
+      } });
+      // Aplica en caliente sobre el medio actual (sin recrear el reproductor).
+      if (vlc && vlc.player) {
+        if (a.enabled === false) { vlc.setSubtitleTrack(-1).catch(() => {}); }
+        else {
+          vlc.getSubtitleTracks().then(async (tracks) => {
+            const real = (tracks || []).filter((t) => t.id >= 0); // id -1 = "Deshabilitar"
+            if (!real.length) return;
+            const want = String(p.subtitles.lang || 'es').toLowerCase();
+            const match = real.find((t) => String(t.name || '').toLowerCase().includes(want))
+              || real.find((t) => /spanish|español/i.test(t.name || ''))
+              || real[0];
+            if (match) await vlc.setSubtitleTrack(match.id);
+          }).catch(() => {});
+        }
+      }
+      log('prefs subtítulos:', JSON.stringify(p.subtitles));
+      const st = notifyChange('api', 'subtitles');
+      return { result: { prefs: p }, state: st };
+    }
+    case 'getSubtitlePrefs': {
+      return { result: { subtitles: store.prefs().subtitles }, state: apiState() };
+    }
+    case 'getSubtitleTracks': {
+      const tracks = vlc && vlc.player ? await vlc.getSubtitleTracks() : [];
+      const rawCount = vlc && vlc.player ? await vlc.getSpuCountRaw() : -1;
+      return { result: { tracks, selected: vlc && vlc.player ? (vlc._last.spu ?? -1) : -1, rawCount }, state: apiState() };
+    }
+    case 'setSubtitleTrack': {
+      if (!vlc || !vlc.player) throw new Error('no hay medio cargado');
+      const id = a.id === undefined ? -1 : Math.trunc(toNum(a.id, -1));
+      const rc = await vlc.setSubtitleTrack(id);
+      if (rc !== 0 && rc !== undefined) log('set_spu rc=', rc);
+      const st = notifyChange('api', 'subtitleTrack');
+      emitEvent('subtitleChanged', { track: id, state: st }, 'api');
+      return { result: { track: id, rc }, state: st };
+    }
+    // --- Historial (repositorio enriquecido) ------------------------------------
+    case 'queryHistory': {
+      return { result: historyRepo.query({
+        q: a.q ? String(a.q) : '', tab: a.tab, sort: a.sort,
+        offset: toNum(a.offset, 0), limit: clamp(Math.trunc(toNum(a.limit, 30)), 1, 200),
+        period: a.period, source: a.source, channel: a.channel,
+      }), state: apiState() };
+    }
+    case 'removeFromHistory': {
+      const r = historyRepo.remove(String(a.id || a.sourceId || ''));
+      return { result: r, state: apiState() };
+    }
+    case 'clearHistory': {
+      const r = historyRepo.clear(a.period || 'all');
+      return { result: r, state: apiState() };
+    }
+    case 'exportHistory': {
+      return { result: { json: historyRepo.exportJSON() }, state: apiState() };
+    }
+    case 'getSearchHistory': {
+      return { result: { searches: historyRepo.listSearches(toNum(a.limit, 20)) }, state: apiState() };
+    }
+    case 'removeSearch': {
+      return { result: historyRepo.removeSearch(String(a.query || '')), state: apiState() };
+    }
+    case 'playHistory': {
+      const e = historyRepo.get(String(a.id || ''));
+      if (!e) throw new Error('no hay entrada de historial con ese id');
+      const item = { id: e.sourceId, url: e.url, title: e.title, channel: e.creator, duration: e.duration, thumbnail: e.thumbnail, provider: e.provider };
+      const r = await playMediaItem(item, origin);
+      return { result: { ...r, history: e }, state: apiState() };
+    }
+    case 'classify': {
+      const items = Array.isArray(a.items) ? a.items : [];
+      return { result: { classes: items.map((it) => ({ id: it && it.id, cls: classifyItem(it) })) }, state: apiState() };
+    }
+    case 'setFilters': {
+      const p = store.setPrefs({ filters: (a.filters && typeof a.filters === 'object') ? a.filters : {} });
+      return { result: { filters: p.filters }, state: apiState() };
+    }
+    case 'getFilters': {
+      return { result: { filters: store.prefs().filters || {} }, state: apiState() };
     }
     default:
       throw new Error('comando no soportado: ' + command);
@@ -864,12 +1113,20 @@ function setupIpc() {
     const o = opts && typeof opts === 'object' ? opts : {};
     try {
       const provider = searchRegistry.get(o.provider);
+      const filters = (o.filters && typeof o.filters === 'object') ? o.filters : null;
       const res = await provider.search(String(o.query || ''), {
         limit: clamp(Math.trunc(toNum(o.limit, 20)), 1, 50),
         offset: Math.max(0, Math.trunc(toNum(o.offset, 0))),
         // La paginación no cancela la búsqueda en curso.
         cancelPrevious: o.cancelPrevious !== false,
+        filters,
       });
+      const q = String(o.query || '').trim();
+      if (q && o.record !== false) {
+        lastSearchQuery = q;
+        lastSearchFilters = filters;
+        try { historyRepo.recordSearch({ query: q, filters: filters || {}, mode: store.prefs().contentMode || 'temas' }); } catch {}
+      }
       return { ok: true, ...res, provider: provider.id };
     } catch (e) {
       const msg = String((e && e.message) || e);
@@ -912,6 +1169,39 @@ function setupIpc() {
   ipcMain.handle('cmp:list-play', (_e, listId) => run('playList', { listId }).then((r) => r.result));
   ipcMain.handle('cmp:list-to-queue', (_e, listId) => run('addListToQueue', { listId }).then((r) => r.result));
   ipcMain.handle('cmp:history', () => ({ history: store.history(100) }));
+  // --- Sprint: preferencias, continuidad, subtítulos, historial -----------------
+  // Toda la UI pasa por el mismo dispatcher (executeCommand) que el API externa.
+  const runRes = async (cmd, args = {}) => {
+    try { const r = await executeCommand(cmd, args, 'user'); return { ok: true, ...r.result }; }
+    catch (e) { return { ok: false, error: String(e.message || e) }; }
+  };
+  ipcMain.handle('cmp:prefs', () => ({ prefs: store.prefs(), continuity: continuity.snapshot() }));
+  ipcMain.handle('cmp:set-content-mode', (_e, payload) => runRes('setContentMode', payload || {}));
+  ipcMain.handle('cmp:set-continuity', (_e, payload) => runRes('setContinuity', payload || {}));
+  ipcMain.handle('cmp:get-continuity', () => ({ continuity: continuity.snapshot(), prefs: store.prefs().continuity }));
+  ipcMain.handle('cmp:set-subtitle-prefs', (_e, payload) => runRes('setSubtitlePrefs', payload || {}));
+  ipcMain.handle('cmp:get-subtitle-prefs', () => ({ subtitles: store.prefs().subtitles }));
+  ipcMain.handle('cmp:subtitle-tracks', async () => {
+    const tracks = vlc && vlc.player ? await vlc.getSubtitleTracks().catch(() => []) : [];
+    return { tracks, selected: vlc && vlc.player ? (vlc._last.spu ?? -1) : -1 };
+  });
+  ipcMain.handle('cmp:set-subtitle-track', (_e, id) => runRes('setSubtitleTrack', { id }));
+  ipcMain.handle('cmp:history-query', (_e, opts) => {
+    try { return { ok: true, ...historyRepo.query(opts || {}) }; }
+    catch (e) { return { ok: false, error: String(e.message || e), items: [], total: 0 }; }
+  });
+  ipcMain.handle('cmp:history-remove', (_e, id) => runRes('removeFromHistory', { id }));
+  ipcMain.handle('cmp:history-clear', (_e, period) => runRes('clearHistory', { period: period || 'all' }));
+  ipcMain.handle('cmp:history-export', () => ({ ok: true, json: historyRepo.exportJSON() }));
+  ipcMain.handle('cmp:search-history', (_e, limit) => ({ searches: historyRepo.listSearches(limit || 20) }));
+  ipcMain.handle('cmp:search-history-remove', (_e, query) => runRes('removeSearch', { query }));
+  ipcMain.handle('cmp:play-history', (_e, id) => runRes('playHistory', { id }));
+  ipcMain.handle('cmp:classify', (_e, items) => {
+    const list = Array.isArray(items) ? items : [];
+    return { classes: list.map((it) => ({ id: it && it.id, cls: classifyItem(it) })) };
+  });
+  ipcMain.handle('cmp:set-filters', (_e, filters) => runRes('setFilters', { filters }));
+  ipcMain.handle('cmp:get-filters', () => ({ filters: store.prefs().filters || {} }));
   // Reproducir un resultado de búsqueda: motor existente + cola + historial.
   ipcMain.handle('cmp:play-media', async (_e, item) => {
     try {
@@ -1215,6 +1505,13 @@ app.whenReady().then(async () => {
       // (evento perdido), se programa la sincronización de eventos.
       try { if (statusOf(vlc.getState()) !== lastStatus) scheduleEngineSync(); } catch {}
       const snap = getState();               // una sola lectura (desde caché)
+      // Guardado periódico de la posición en el historial (throttle: cada ~5 s
+      // y el repositorio además limita por entrada). Nunca crea entradas nuevas:
+      // sólo actualiza la del medio actual.
+      pollTick++;
+      if (pollTick % 5 === 0 && currentId && (snap.status === 'playing' || snap.status === 'paused')) {
+        try { historyRepo.updateProgress(currentId, snap.time || 0, snap.length || 0); } catch {}
+      }
       if (snap.status === 'playing') {
         stateVersion++;
         emitEvent('positionChanged', {
@@ -1349,10 +1646,12 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   try { unregisterVideoShortcuts(); } catch {}
   try { emitEvent('playerDisconnected', { reason: 'la app se cierra' }, 'system'); } catch {}
+  try { saveProgressNow(); } catch {}
   try { api?.stop(); } catch {}
   try { vlc?.dispose(); } catch {}
   try { proxy?.close(); } catch {}
   try { store?.flush(true); } catch {}
+  try { cleanupSubtitles(subsDir(process.env.CMP_TMPDIR || path.join(ROOT, '.tmp'))); } catch {}
   log('will-quit');
   flushLog(true);   // volcado sincrónico final: no se pierde nada del log
 });

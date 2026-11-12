@@ -220,3 +220,116 @@ body.showModal .cmp-explorer { display: flex; }
   pointer-events: none; max-width: 80%;
 }
 .cmp-explorer .ex-toast.show { opacity: 1; }
+
+/* ==========================================================================
+   SPRINT: modos de contenido, popovers (mezcla/filtros) e historial.
+   ========================================================================== */
+.cmp-explorer .ex-top-actions { display: flex; gap: 4px; flex: 0 0 auto; align-items: center; position: relative; }
+.cmp-explorer .ex-top-actions .ex-btn.icon { position: relative; }
+.cmp-explorer .ex-top-actions .ex-badge {
+  position: absolute; top: -2px; right: -2px; background: #7c3aed; color: #fff;
+  font-size: 10px; min-width: 15px; height: 15px; line-height: 15px; text-align: center;
+  border-radius: 8px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center;
+}
+.cmp-explorer .ex-filters { display: none; } /* sustituido por el popover exFilterPop */
+
+/* fila de modos [Música] [Temas] [Personalizado] */
+.cmp-explorer .ex-modes {
+  display: flex; gap: 6px; padding: 7px 14px; flex: 0 0 auto;
+  border-bottom: 1px solid rgba(168, 85, 247, .12); align-items: center;
+}
+.cmp-explorer .ex-mode {
+  background: #1b1a25; border: 1px solid #2a2836; color: #b6aecb; font-size: 12px; font-weight: 600;
+  padding: 5px 13px; border-radius: 15px; cursor: pointer; transition: all .15s ease;
+}
+.cmp-explorer .ex-mode:hover { color: #fff; border-color: #4a4166; }
+.cmp-explorer .ex-mode.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+
+/* popovers flotantes (mezcla y filtros) */
+.cmp-explorer .ex-pop {
+  position: absolute; z-index: 70; width: 320px; max-width: calc(100% - 24px);
+  background: #1e1c2a; border: 1px solid #3d3854; border-radius: 14px; padding: 12px 14px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .6); display: none;
+}
+.cmp-explorer .ex-pop.show { display: block; }
+.cmp-explorer .ex-pop-title { font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 10px; }
+.cmp-explorer .ex-pop-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.cmp-explorer .ex-pop .ex-btn { padding: 7px 13px; font-size: 12px; }
+
+/* popover de mezcla */
+.cmp-explorer .ex-mix-row { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; }
+.cmp-explorer .ex-mix-label { font-size: 12px; color: #cfc8e0; flex: 0 0 auto; }
+.cmp-explorer .ex-mix-row input[type=range] { flex: 1; accent-color: #8b5cf6; }
+.cmp-explorer .ex-mix-pct { font-size: 13px; font-weight: 700; color: #c4b5fd; min-width: 42px; text-align: right; }
+.cmp-explorer .ex-mix-sub { font-size: 11.5px; color: #8f86a8; margin-bottom: 8px; }
+.cmp-explorer .ex-mix-counts { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px; align-items: center; font-size: 11.5px; color: #b6aecb; }
+.cmp-explorer .ex-mix-counts input {
+  width: 100%; background: #191823; border: 1px solid #2e2b3d; border-radius: 8px; color: #fff;
+  font-size: 12px; padding: 5px 7px; outline: none;
+}
+.cmp-explorer .ex-mix-counts input:focus { border-color: #8b5cf6; }
+.cmp-explorer .ex-mix-preview { font-size: 11.5px; color: #a79ec0; background: #191823; border-radius: 8px; padding: 7px 9px; margin-top: 8px; }
+.cmp-explorer .ex-mix-presets { display: flex; gap: 6px; margin-top: 8px; }
+.cmp-explorer .ex-mix-presets .ex-btn { padding: 5px 10px; font-size: 11px; }
+
+/* popover de filtros */
+.cmp-explorer .ex-frow { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-top: 1px solid rgba(168, 85, 247, .08); }
+.cmp-explorer .ex-frow:first-of-type { border-top: 0; }
+.cmp-explorer .ex-flabel { flex: 0 0 118px; font-size: 12px; color: #cfc8e0; padding-top: 7px; display: flex; flex-direction: column; gap: 3px; }
+.cmp-explorer .ex-scope { font-size: 9.5px; color: #8f86a8; background: #2a2739; border-radius: 7px; padding: 1px 6px; width: fit-content; }
+.cmp-explorer .ex-scope.local { color: #f0c987; }
+.cmp-explorer .ex-fctl { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cmp-explorer .ex-fctl .ex-filter { width: 100%; }
+.cmp-explorer .ex-ftext { flex: 1; min-width: 120px; background: #191823; border: 1px solid #2e2b3d; border-radius: 8px; color: #fff; font-size: 12px; padding: 6px 8px; outline: none; }
+.cmp-explorer .ex-ftext:focus { border-color: #8b5cf6; }
+.cmp-explorer .ex-fctl input[type=date] { background: #191823; border: 1px solid #2e2b3d; border-radius: 8px; color: #cfc8e0; font-size: 11px; padding: 5px 6px; }
+.cmp-explorer .ex-check { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #cfc8e0; cursor: pointer; }
+.cmp-explorer .ex-check input { accent-color: #8b5cf6; }
+
+/* insignia de clasificación en las tarjetas */
+.cmp-explorer .ex-card { position: relative; }
+.cmp-explorer .ex-cls {
+  position: absolute; top: 6px; left: 6px; z-index: 2; font-size: 10px; font-weight: 700;
+  background: rgba(20, 18, 30, .85); color: #c4b5fd; border: 1px solid rgba(139, 92, 246, .5);
+  padding: 2px 7px; border-radius: 9px; pointer-events: none;
+}
+.cmp-explorer .ex-card.cls-theme .ex-cls { color: #9ecbff; border-color: rgba(110, 168, 255, .45); }
+
+/* ---------- panel de historial ---------- */
+.cmp-explorer .ex-hist-bar { gap: 8px; }
+.cmp-explorer .ex-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+.cmp-explorer .ex-chip {
+  background: #1b1a25; border: 1px solid #2a2836; color: #b6aecb; font-size: 11.5px; font-weight: 600;
+  padding: 4px 11px; border-radius: 13px; cursor: pointer;
+}
+.cmp-explorer .ex-chip:hover { color: #fff; }
+.cmp-explorer .ex-chip.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+.cmp-explorer .ex-hist-search { flex: 1; min-width: 130px; background: #191823; border: 1px solid #2e2b3d; border-radius: 16px; padding: 7px 12px; font-size: 12px; color: #fff; outline: none; }
+.cmp-explorer .ex-hist-search:focus { border-color: #8b5cf6; }
+.cmp-explorer .ex-hist-list { display: flex; flex-direction: column; gap: 8px; padding-bottom: 8px; }
+.cmp-explorer .ex-hist-foot { margin-top: 10px; border-top: 1px solid rgba(168, 85, 247, .12); padding-top: 10px; }
+.cmp-explorer .ex-hrow {
+  display: flex; gap: 10px; align-items: center; background: #1b1a25; border: 1px solid #2a2836;
+  border-radius: 10px; padding: 8px 10px;
+}
+.cmp-explorer .ex-hrow:hover { border-color: #4a4166; }
+.cmp-explorer .ex-hthumb { width: 96px; height: 54px; border-radius: 7px; background: #262434; overflow: hidden; flex: 0 0 auto; }
+.cmp-explorer .ex-hthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cmp-explorer .ex-hbody { flex: 1; min-width: 0; }
+.cmp-explorer .ex-htitle { font-size: 12.5px; font-weight: 600; color: #ece9f5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmp-explorer .ex-hsub { font-size: 11px; color: #8f86a8; margin-top: 2px; }
+.cmp-explorer .ex-hprog { height: 3px; background: #2a2739; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.cmp-explorer .ex-hprog i { display: block; height: 100%; background: #a855f7; border-radius: 2px; }
+.cmp-explorer .ex-hbadges { display: flex; gap: 5px; margin-top: 5px; flex-wrap: wrap; }
+.cmp-explorer .ex-hbadge { font-size: 10px; border-radius: 8px; padding: 1px 7px; background: #2a2739; color: #b9aef0; }
+.cmp-explorer .ex-hbadge.done { color: #9fe6b0; }
+.cmp-explorer .ex-hbadge.partial { color: #f0c987; }
+.cmp-explorer .ex-hbadge.music { color: #c4b5fd; }
+.cmp-explorer .ex-hbadge.theme { color: #9ecbff; }
+.cmp-explorer .ex-hbadge.ctx { color: #8f86a8; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-explorer .ex-hactions { display: flex; gap: 2px; opacity: .55; flex: 0 0 auto; }
+.cmp-explorer .ex-hrow:hover .ex-hactions { opacity: 1; }
+.cmp-explorer .ex-hactions .ex-act { background: none; border: 0; color: #cfc8e0; cursor: pointer; padding: 6px; border-radius: 7px; display: flex; }
+.cmp-explorer .ex-hactions .ex-act:hover { background: #322d47; color: #fff; }
+.cmp-explorer .ex-hactions .ex-act svg { width: 16px; height: 16px; fill: currentColor; }
+#exHistMore { margin: 4px auto; display: inline-flex; }

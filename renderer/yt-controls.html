@@ -52,6 +52,30 @@
   #vol::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:#fff;cursor:pointer}
 
   #right{display:flex;align-items:center;gap:2px;margin-left:auto}
+  /* controles de texto compactos (CC, continuidad) */
+  button.ic.txt{width:auto;padding:0 8px;border-radius:8px;font-size:11px;font-weight:700;letter-spacing:.4px}
+  button.ic.txt.on{background:rgba(255,255,255,.22);color:#fff}
+  button.ic.txt.off{opacity:.55}
+  .bar-sel{background:rgba(24,24,26,.9);color:#e8e8e8;border:1px solid rgba(255,255,255,.25);
+    border-radius:8px;font-size:11px;font-weight:600;padding:4px 2px;outline:none;cursor:pointer;max-width:56px}
+  /* popovers de la barra (continuidad / pistas de subtítulos) */
+  .bar-pop{position:absolute;right:10px;bottom:66px;width:210px;background:rgba(18,18,20,.96);
+    border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:10px 12px;display:none;z-index:40;
+    box-shadow:0 8px 30px rgba(0,0,0,.55);font-size:12px;color:#e8e8e8}
+  .bar-pop.show{display:block}
+  .bp-title{font-size:11px;color:#9d93b8;margin:4px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .bp-row{display:flex;align-items:center;gap:7px;padding:4px 2px;cursor:pointer;border-radius:6px}
+  .bp-row:hover{background:rgba(255,255,255,.07)}
+  .bp-row input{accent-color:#ff0000}
+  .bp-sel{width:100%;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.2);
+    border-radius:8px;padding:5px 7px;font-size:12px;outline:none;margin-top:2px}
+  .bp-sel option{color:#111}
+  #subTracks{display:flex;flex-direction:column;gap:3px;max-height:180px;overflow-y:auto}
+  #subTracks button{background:none;border:0;color:#e8e8e8;text-align:left;padding:5px 8px;border-radius:7px;
+    cursor:pointer;font-size:12px;display:flex;justify-content:space-between;gap:8px}
+  #subTracks button:hover{background:rgba(255,255,255,.09)}
+  #subTracks button.sel{background:rgba(255,0,0,.25);color:#fff}
+  #subTracks .none{color:#9d93b8;font-size:11px;padding:4px 2px}
   #spin{width:20px;height:20px;border:2.5px solid rgba(255,255,255,.25);border-top-color:#ff0000;
     border-radius:50%;animation:sp .8s linear infinite;display:none}
   body.buffering #spin{display:block}
@@ -140,6 +164,34 @@
     <span id="tot">0:00</span>
     <div id="right">
       <div id="spin"></div>
+      <!-- Continuidad: [Solo este | Continuo] + fuente del siguiente -->
+      <button id="contBtn" class="ic txt" title="Continuidad al terminar (solo este / continuo)">CC∞</button>
+      <div id="contPop" class="bar-pop">
+        <div class="bp-title">Al terminar…</div>
+        <label class="bp-row"><input type="radio" name="contMode" value="solo"> Solo este</label>
+        <label class="bp-row"><input type="radio" name="contMode" value="continuo"> Continuo</label>
+        <div class="bp-title">Siguiente desde</div>
+        <select id="contSource" class="bp-sel">
+          <option value="search">Mi búsqueda</option>
+          <option value="channel">Mismo canal</option>
+          <option value="topic">Explorar tema</option>
+          <option value="discover">Descubrimiento</option>
+        </select>
+      </div>
+      <!-- Subtítulos: [CC] + idioma -->
+      <button id="ccBtn" class="ic txt" title="Subtítulos (activar/desactivar)">CC</button>
+      <select id="langSel" class="bar-sel" title="Idioma de subtítulos preferido">
+        <option value="es">ES</option>
+        <option value="en">EN</option>
+        <option value="pt">PT</option>
+        <option value="fr">FR</option>
+        <option value="de">DE</option>
+        <option value="it">IT</option>
+      </select>
+      <div id="subPop" class="bar-pop">
+        <div class="bp-title">Pistas disponibles</div>
+        <div id="subTracks"></div>
+      </div>
       <button id="search" class="ic" title="Buscar / cargar URL">
         <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.49 4.49 0 0 1 9.5 14"/></svg>
       </button>
@@ -156,6 +208,7 @@
 <script src="search/explorer-utils.js"></script>
 <script src="search/explorer-results.js"></script>
 <script src="search/explorer-lists.js"></script>
+<script src="search/explorer-sprint.js"></script>
 <script src="search/explorer.js"></script>
 <script src="yt-controls.js"></script>
 </body>

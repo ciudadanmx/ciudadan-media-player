@@ -40,6 +40,7 @@ export class ContinuityEngine {
     this.source = 'search';           // 'search' | 'channel' | 'topic' | 'discover'
     this.contentMode = 'temas';       // 'musica' | 'temas' | 'personalizado'
     this.autoQueue = [];              // cola automática preparada (metadatos)
+    this.recentIds = [];              // ids reproducidos hace poco (para no repetir)
     this.lastEndAt = 0;
     this.busy = false;                // hay una transición en curso
     this.lastDecision = null;
@@ -62,6 +63,12 @@ export class ContinuityEngine {
     this.contentMode = ['musica', 'temas', 'personalizado'].includes(mode) ? mode : 'temas';
     if (mixCfg && typeof mixCfg.musicPct === 'number') this.mix.setRatio(mixCfg.musicPct);
     if (mixCfg && (mixCfg.musicCount || mixCfg.themeCount)) this.mix.setRatioFromCounts(mixCfg.musicCount, mixCfg.themeCount);
+  }
+
+  /** Ids reproducidos recientemente: no se vuelven a encadenar. */
+  setRecentIds(ids) {
+    this.recentIds = (Array.isArray(ids) ? ids : []).map((i) => String(i || '')).filter(Boolean).slice(-60);
+    return this.recentIds.length;
   }
 
   /**
@@ -130,7 +137,11 @@ export class ContinuityEngine {
       }
       // 3) Descubrimiento nuevo (sólo metadatos, hasta 3 preparados).
       //    Un error de red/búsqueda NUNCA debe detener la reproducción actual.
-      const exclude = this.queue.items.map((i) => i.id).concat(current ? [String(current.id)] : []);
+      //    Se excluyen: la cola, el vídeo actual y los reproducidos hace poco
+      //    (para no encadenar el mismo vídeo en bucle).
+      const exclude = this.queue.items.map((i) => i.id)
+        .concat(current ? [String(current.id)] : [])
+        .concat(Array.isArray(this.recentIds) ? this.recentIds : []);
       // Si la fuente configurada es "search" pero NO hay búsqueda activa (el
       // usuario pegó una URL directa), se buscan vídeos RELACIONADOS por
       // metadatos: sin este degradado la reproducción se quedaba detenida.
@@ -140,7 +151,7 @@ export class ContinuityEngine {
       try {
         candidates = await this.discovery.candidatesFor({
           source: primary, current, searchQuery,
-          limit: Math.max(10, PREPARE_N * 3), signal, excludeIds: exclude,
+          limit: Math.max(10, PREPARE_N * 3), signal, excludeIds: exclude, maxQueries: 2,
         }) || [];
       } catch (e) {
         this.log('continuidad: descubrimiento falló (tolerado):', String((e && e.message) || e));
@@ -152,7 +163,7 @@ export class ContinuityEngine {
           if (alt === primary) continue;
           try {
             const r = await this.discovery.candidatesFor({
-              source: alt, current, searchQuery, limit: 9, signal, excludeIds: exclude,
+              source: alt, current, searchQuery, limit: 9, signal, excludeIds: exclude, maxQueries: 2,
             }) || [];
             if (r.length) {
               candidates = r;
@@ -179,7 +190,20 @@ export class ContinuityEngine {
         ? this.mix.pick(prepared.map((c) => ({ item: c, cls: c.classification || classifyItem(c) })))
         : { item: prepared[0], cls: prepared[0].classification, type: prepared[0].classification };
       if (!pick || !pick.item) return { action: 'no-candidates' };
+      // Red de seguridad: nunca encadenar el mismo vídeo que acaba de terminar.
+      const curId = String((current && current.id) || '').toLowerCase();
+      const pickId = String(pick.item.id || '').toLowerCase();
+      if (curId && pickId && curId === pickId) {
+        const alt = prepared.find((c) => String((c && c.id) || '').toLowerCase() !== curId);
+        if (!alt) {
+          this.log('continuidad: el único candidato era el vídeo actual -> sin candidatos');
+          return { action: 'no-candidates' };
+        }
+        this.log('continuidad: candidato repetido descartado, se usa otro');
+        pick.item = alt;
+      }
       this.log('continuidad: descubrimiento (' + usedSource + ') ->', pick.item.title || pick.item.id,
+        'id=' + (pick.item.id || '?'),
         this.contentMode === 'personalizado' ? 'mezcla=' + this.mix.stats().actualMusicPct?.toFixed(0) + '% música' : '');
       const decision = { action: 'play', origin: 'discover', item: pick.item };
       this.lastDecision = decision;

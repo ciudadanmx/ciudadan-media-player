@@ -457,6 +457,13 @@ async function loadUrlInner(url, origin = 'user') {
       { context: lastSearchQuery || null, classification: cls },
     );
     queue.setCurrent(ytId);
+    // La continuidad no debe encadenar un vídeo ya reproducido hace poco.
+    try {
+      const recent = historyRepo.query({ limit: 30 }).items
+        .map((h) => h.sourceId || String(h.id || '').replace(/^[^:]+:/, ''))
+        .filter(Boolean);
+      continuity.setRecentIds(recent);
+    } catch {}
     if (entry.errors?.length) log('avisos del resolver:', entry.errors.join(' || '));
     proxy.register(entry);
     const streamUrl = proxy.streamUrl(entry.id);

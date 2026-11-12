@@ -603,6 +603,7 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
 | `tools/test-sprint-ui.mjs` | **41/41 PASS** — integración real con app viva: reproducción verificada, caso del usuario (URL directa sin búsqueda → sigue con un relacionado), solo/continuo, CC SPU real, historial/playHistory, filtros persistentes, UI vía CDP |
 | `tools/probe-spu.mjs` | Sonda aislada de libVLC (file:// vs HTTP; demostró `input-slave` y el fix de `koffi.address`/decode) |
 | `tools/final-check.mjs` | Verificación final: `playing` con posición avanzando (0→4200 ms) y volumen 100 vía API |
+| `tools/verify-continuity.mjs` | Verificación **en vivo** de la continuidad en la app real (sin autotest): carga una URL directa sin ninguna búsqueda previa y comprueba que al terminar **sigue con otro vídeo** |
 
 ### 8.3 Resultados de pruebas reales (12/11/2026)
 

@@ -86,14 +86,15 @@ export class DiscoveryService {
    * Devuelve candidatos normalizados y clasificados (máx. limit).
    * Nunca lanza: un error de búsqueda no debe detener el reproductor.
    */
-  async candidatesFor({ source = 'search', current = null, searchQuery = '', limit = 10, signal = null, excludeIds = [] } = {}) {
-    const exclude = new Set(excludeIds.filter(Boolean));
-    if (current && current.id) exclude.add(String(current.id));
+  async candidatesFor({ source = 'search', current = null, searchQuery = '', limit = 10, signal = null, excludeIds = [], maxQueries = 3 } = {}) {
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    const exclude = new Set(excludeIds.filter(Boolean).map(norm));
+    if (current && current.id) exclude.add(norm(current.id));
     const out = [];
     const seen = new Set();
     const push = (item) => {
-      const id = String(item && item.id || '');
-      if (!id || seen.has(id) || exclude.has(id)) return;
+      const id = String((item && (item.id || item.videoId)) || '').trim();
+      if (!id || seen.has(id) || exclude.has(norm(id))) return;
       seen.add(id);
       out.push({ ...item, id, classification: item.classification || classifyItem(item) });
     };
@@ -114,13 +115,12 @@ export class DiscoveryService {
       const queries = [];
       if (searchQuery) queries.push(String(searchQuery));
       for (const q of relatedQueriesFrom(current, '', 3)) queries.push(q);
-      for (const q of queries) {
+      for (const q of queries.slice(0, Math.max(1, maxQueries))) {
         const r = await run(this.search, q, { limit: Math.max(limit, 10), offset: 0, cancelPrevious: false, signal });
         for (const it of (r && r.items) || []) push(it);
         if (out.length >= limit) break;
       }
-    } else if (source === 'channel' && current) {
-      const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null)
+    } else if (source === 'channel' && current) {      const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null)
         || (current.uploaderId ? `https://www.youtube.com/@${current.uploaderId}` : null);
       if (chUrl && this.fetchFlat) {
         const r = await run(this.fetchFlat, chUrl, { limit: Math.max(limit, 10), signal });

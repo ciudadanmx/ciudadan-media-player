@@ -32,6 +32,7 @@ export function assertTools() {
 }
 
 // Clientes de YouTube que yt-dlp probará en orden (el anti-bot 429/"Sign in" exige variar).
-// android suele dar MP4 progresivo muxado (itag 18) con URL directa seekable.
+// android y mweb son los que mejor funcionan hoy: dan MP4 progresivo muxado
+// (itag 18) con URL directa seekable. Los demás quedan como respaldo.
 // web_embedded/mweb resuelven retos JS con Deno (jsc:deno) — razón del rol de Deno.
-export const YT_CLIENTS = ['android', 'tv_embedded', 'web_embedded', 'mweb', 'ios'];
+export const YT_CLIENTS = ['android', 'mweb', 'tv_embedded', 'web_embedded', 'ios', 'tv', 'web_safari'];

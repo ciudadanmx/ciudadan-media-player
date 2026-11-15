@@ -428,6 +428,10 @@ async function main() {
   // --- 7. avance automático al terminar el vídeo ----------------------------
   try {
     // Cola: [vídeo corto (actual), vídeo siguiente] y autoavance activado.
+    // El modo de continuidad se fija en "continuo": en "solo este" el motor no
+    // encadena por diseño (y el test debe ser autónomo, no depender de las
+    // preferencias que dejó la ejecución anterior).
+    await apiCmd('setContinuity', { mode: 'continuo', source: 'search' });
     await apiCmd('clearQueue');
     await apiCmd('addToQueue', { item: SHORT_VID, position: 'end' });
     await apiCmd('addToQueue', { item: { id: 'aqz-KE-bpKQ', url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ', title: 'Big Buck Bunny' }, position: 'end' });

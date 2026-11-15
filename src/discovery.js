@@ -86,7 +86,7 @@ export class DiscoveryService {
    * Devuelve candidatos normalizados y clasificados (máx. limit).
    * Nunca lanza: un error de búsqueda no debe detener el reproductor.
    */
-  async candidatesFor({ source = 'search', current = null, searchQuery = '', limit = 10, signal = null, excludeIds = [], maxQueries = 3 } = {}) {
+  async candidatesFor({ source = 'search', current = null, searchQuery = '', limit = 10, signal = null, excludeIds = [], maxQueries = 3, budgetMs = 45000 } = {}) {
     const norm = (v) => String(v || '').trim().toLowerCase();
     const exclude = new Set(excludeIds.filter(Boolean).map(norm));
     if (current && current.id) exclude.add(norm(current.id));
@@ -99,71 +99,79 @@ export class DiscoveryService {
       out.push({ ...item, id, classification: item.classification || classifyItem(item) });
     };
 
+    // PRESUPUESTO DE TIEMPO: las búsquedas a YouTube tardan 30-120 s cuando la
+    // red va mal. En serie, 3-4 consultas sumaban varios minutos y el usuario
+    // se quedaba sin reproducción; ahora se lanzan EN PARALELO y con un
+    // presupuesto global (por defecto 45 s) del que se sale con los
+    // candidatos parciales.
+    const deadline = Date.now() + Math.max(5000, budgetMs);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, Math.max(5000, budgetMs));
+    const sig = signal ? (typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal) : ctrl.signal;
+
     const run = async (fn, ...args) => {
       try { return await fn(...args); }
       catch (e) {
-        if (signal && signal.aborted) return null;
+        if (sig && sig.aborted) return null;
         this.log('discovery: error tolerado en', source, String((e && e.message) || e));
         return null;
       }
     };
+    // Búsquedas en paralelo: se recogen en el orden de las consultas.
+    const buscar = async (queries, lim) => {
+      const rs = await Promise.all(queries.map(async (q) => {
+        if (Date.now() > deadline) return null;
+        return run(this.search, q, { limit: lim, offset: 0, cancelPrevious: false, signal: sig });
+      }));
+      for (const r of rs) for (const it of (r && r.items) || []) push(it);
+    };
 
-    if (source === 'search') {
-      // La búsqueda activa es la primera opción; si no hay (el usuario pegó una
-      // URL directa) o si no devuelve nada, se buscan vídeos RELACIONADOS por
-      // metadatos (tema del título, canal, categoría).
-      const queries = [];
-      if (searchQuery) queries.push(String(searchQuery));
-      for (const q of relatedQueriesFrom(current, '', 3)) queries.push(q);
-      for (const q of queries.slice(0, Math.max(1, maxQueries))) {
-        const r = await run(this.search, q, { limit: Math.max(limit, 10), offset: 0, cancelPrevious: false, signal });
-        for (const it of (r && r.items) || []) push(it);
-        if (out.length >= limit) break;
-      }
-    } else if (source === 'channel' && current) {      const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null)
-        || (current.uploaderId ? `https://www.youtube.com/@${current.uploaderId}` : null);
-      if (chUrl && this.fetchFlat) {
-        const r = await run(this.fetchFlat, chUrl, { limit: Math.max(limit, 10), signal });
-        for (const it of (r && r.items) || []) push(it);
-      }
-      // Si el canal no dio candidatos (o no hay fetchFlat), caer a tema.
-      if (!out.length) {
-        for (const q of relatedQueriesFrom(current, '', 3)) {
-          const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
+    try {
+      if (source === 'search') {
+        // La búsqueda activa es la primera opción; si no hay (el usuario pegó una
+        // URL directa) o si no devuelve nada, se buscan vídeos RELACIONADOS por
+        // metadatos (tema del título, canal, categoría).
+        const queries = [];
+        if (searchQuery) queries.push(String(searchQuery));
+        for (const q of relatedQueriesFrom(current, '', 3)) queries.push(q);
+        await buscar(queries.slice(0, Math.max(1, maxQueries)), Math.max(limit, 10));
+      } else if (source === 'channel' && current) {
+        const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null)
+          || (current.uploaderId ? `https://www.youtube.com/@${current.uploaderId}` : null);
+        if (chUrl && this.fetchFlat) {
+          const r = await run(this.fetchFlat, chUrl, { limit: Math.max(limit, 10), signal: sig });
           for (const it of (r && r.items) || []) push(it);
-          if (out.length >= limit) break;
         }
-      }
-    } else if (source === 'topic') {
-      for (const q of relatedQueriesFrom(current, '', 4)) {
-        const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
-        for (const it of (r && r.items) || []) push(it);
-        if (out.length >= limit) break;
-      }
-    } else if (source === 'discover') {
-      // Variedad: mitad del canal actual, mitad de temas afines.
-      if (current && this.fetchFlat) {
-        const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null);
-        if (chUrl) {
-          const r = await run(this.fetchFlat, chUrl, { limit: Math.ceil(limit / 2), signal });
+        // Si el canal no dio candidatos (o no hay fetchFlat), caer a tema.
+        if (!out.length) {
+          await buscar(relatedQueriesFrom(current, '', 3), 6);
+        }
+      } else if (source === 'topic') {
+        await buscar(relatedQueriesFrom(current, '', 4), 6);
+      } else if (source === 'discover') {
+        // Variedad: mitad del canal actual, mitad de temas afines.
+        if (current && this.fetchFlat) {
+          const chUrl = current.channelUrl || (current.channelId ? `https://www.youtube.com/channel/${current.channelId}/videos` : null);
+          if (chUrl) {
+            const r = await run(this.fetchFlat, chUrl, { limit: Math.ceil(limit / 2), signal: sig });
+            for (const it of (r && r.items) || []) push(it);
+          }
+        }
+        const queries = current ? relatedQueriesFrom(current, '', 2) : (searchQuery ? [searchQuery] : []);
+        await buscar(queries, 6);
+        if (!out.length && searchQuery) {
+          const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal: sig });
           for (const it of (r && r.items) || []) push(it);
         }
       }
-      const queries = current ? relatedQueriesFrom(current, '', 2) : (searchQuery ? [searchQuery] : []);
-      for (const q of queries) {
-        const r = await run(this.search, q, { limit: 6, offset: 0, cancelPrevious: false, signal });
-        for (const it of (r && r.items) || []) push(it);
-        if (out.length >= limit) break;
-      }
-      if (!out.length && searchQuery) {
-        const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal });
+      if (!out.length && source !== 'search' && searchQuery) {
+        // Último recurso: la búsqueda activa.
+        const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal: sig });
         for (const it of (r && r.items) || []) push(it);
       }
-    }
-    if (!out.length && source !== 'search' && searchQuery) {
-      // Último recurso: la búsqueda activa.
-      const r = await run(this.search, searchQuery, { limit, offset: 0, cancelPrevious: false, signal });
-      for (const it of (r && r.items) || []) push(it);
+    } finally {
+      clearTimeout(timer);
+      try { ctrl.abort(); } catch {}
     }
     return out.slice(0, limit);
   }

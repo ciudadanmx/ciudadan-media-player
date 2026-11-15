@@ -2,11 +2,15 @@
 // Reenvía el encabezado Range a googlevideo => respuestas 206 => libVLC puede hacer SEEK.
 // No descarga el video completo: transmite chunk a chunk (streaming).
 import http from 'node:http';
+import fs from 'node:fs';
 import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { TOOLS } from './paths.js';
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer']);
+// Tamaño máximo de cada tramo servido al cliente (8 MB): evita que el proxy
+// descargue el vídeo entero de golpe y sature el hilo principal.
+const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
 
 export class StreamProxy {
   constructor(opts = {}) {
@@ -15,6 +19,7 @@ export class StreamProxy {
     this.server = http.createServer((req, res) => this.#onRequest(req, res));
     this.port = 0;
     this.onLog = opts.onLog || (() => {});
+    this.onUrlExpired = opts.onUrlExpired || null;
     // Tope de entradas guardadas: el Map crecía sin límite (cada carga o
     // recarga de un vídeo añadía una) y consumía memoria sin necesidad.
     this.maxEntries = opts.maxEntries || 60;
@@ -100,14 +105,73 @@ export class StreamProxy {
       if (entry.mode !== 'range' && entry.mode !== 'hls') { res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'mode not proxyable', mode: entry.mode })); return; }
       entry.hits++;
       const headers = { ...(entry.headers || {}) };
-      if (req.headers.range) headers['Range'] = req.headers.range;
+      // El cliente (libVLC) pide "bytes=X-" (rango abierto) y el CDN devuelve
+      // el fichero COMPLETO: el proxy lo bajaba entero de golpe (69 MB) y el
+      // hilo principal se saturaba (retrasos de ~1 s). Se acota cada petición
+      // a un tramo (8 MB): libVLC va pidiendo el siguiente y así el stream
+      // fluye sin picos de trabajo ni descargas masivas de golpe.
+      let rangoCliente = req.headers.range || '';
+      if (rangoCliente) {
+        const m = /^bytes=(\d+)-(\d*)$/.exec(String(rangoCliente).trim());
+        if (m) {
+          const start = Number(m[1]);
+          const end = m[2] ? Number(m[2]) : start + MAX_CHUNK_BYTES - 1;
+          const tramo = Math.min(end, start + MAX_CHUNK_BYTES - 1);
+          headers['Range'] = `bytes=${start}-${tramo}`;
+        }
+      }
       if (req.headers['user-agent']) headers['User-Agent'] = req.headers['user-agent']; // respeta UA de libVLC si lo envía
       const ac = new AbortController();
       req.on('close', () => { try { ac.abort(); } catch {} });
       this.#track(id, res, ac);
       try {
-        const upstream = await fetch(entry.url, { headers, redirect: 'follow', signal: ac.signal });
+        let upstream = await fetch(entry.url, { headers, redirect: 'follow', signal: ac.signal });
+        // El CDN de YouTube responde 416 (Range Not Satisfiable) cuando el
+        // rango pedido ya no es válido (URL caducada, tamaño distinto o rango
+        // fuera de límites). Eso NO debe tumbar la reproducción: se reintenta
+        // la misma URL SIN Range, sirviendo desde el inicio.
+        if (upstream.status === 416 && req.headers.range) {
+          // El 416 del CDN tiene dos causas distintas:
+          //  a) el cliente pide un rango que empieza en/tras el FINAL del
+          //     recurso (bytes=69744848- con un vídeo de 69744848 bytes):
+          //     es la señal normal de "se acabó el stream". Se responde con el
+          //     416 y su Content-Range para que libVLC lo interprete como EOF
+          //     y termine el medio con cleanly (antes se veía como error y el
+          //     vigilante recargaba el vídeo en bucle).
+          //  b) la URL directa caducó: entonces se reintenta SIN Range.
+          const cr416 = upstream.headers.get('content-range') || '';
+          const total = /\*\/(\d+)/.exec(cr416)?.[1];
+          const rangoEnviado = headers['Range'] || req.headers.range || '';
+          const start = /bytes=(\d+)/.exec(rangoEnviado)?.[1];
+          const esFinDeStream = total && start !== undefined && Number(start) >= Number(total);
+          if (esFinDeStream) {
+            this.onLog('proxy: fin de stream (416) para ' + id + ': rango ' + rangoEnviado + ' tamaño ' + total);
+            try { if (upstream.body) await upstream.body.cancel(); } catch {}
+            res.writeHead(416, { 'content-range': cr416, 'accept-ranges': 'bytes', 'content-type': 'text/plain' });
+            res.end('fin del stream');
+            return;
+          }
+          this.onLog('proxy: upstream 416 para ' + id + ': range=' + rangoEnviado +
+            ' url=' + String(entry.url || '').slice(0, 140));
+          try { if (upstream.body) await upstream.body.cancel(); } catch {}
+          const h2 = { ...(entry.headers || {}) };
+          if (req.headers['user-agent']) h2['User-Agent'] = req.headers['user-agent'];
+          upstream = await fetch(entry.url, { headers: h2, redirect: 'follow', signal: ac.signal });
+          if (!upstream.ok && upstream.status !== 206 && req.headers.range) {
+            // Segundo intento: servir desde el inicio (sin Range).
+            this.onLog('proxy: upstream ' + upstream.status + ' sin Range, se sirve desde el inicio (' + id + ')');
+            try { if (upstream.body) await upstream.body.cancel(); } catch {}
+            const h3 = { ...(entry.headers || {}) };
+            if (req.headers['user-agent']) h3['User-Agent'] = req.headers['user-agent'];
+            upstream = await fetch(entry.url, { headers: h3, redirect: 'follow', signal: ac.signal });
+          }
+        }
         if (!upstream.ok && upstream.status !== 206) {
+          // 403/404/416 = la URL directa caducó o el CDN la rechazó: se avisa
+          // para que se re-resuelva el vídeo (y no se repita la misma URL mala).
+          if ([403, 404, 410, 416].includes(upstream.status)) {
+            try { this.onUrlExpired?.(id, upstream.status); } catch {}
+          }
           const body = await upstream.text().catch(() => '');
           this.onLog('proxy: upstream ' + upstream.status + ' para ' + id + ': ' + body.slice(0, 120));
           res.writeHead(upstream.status, { 'content-type': 'text/plain' });
@@ -168,6 +232,9 @@ export class StreamProxy {
       '--extractor-args', `youtube:player_client=${entry.pipeClient || 'android'}`,
       '-f', 'bv*+ba/b', '-o', '-', entry.sourceUrl,
     ];
+    // El pipe necesita ffmpeg para muxear audio+vídeo: se le indica la ruta
+    // explícita para que no dependa del PATH del proceso.
+    try { if (TOOLS && TOOLS.ffmpeg && fs.existsSync(TOOLS.ffmpeg)) args.unshift('--ffmpeg-location', TOOLS.ffmpeg); } catch {}
     let child;
     try {
       child = spawn(TOOLS.ytdlp, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });

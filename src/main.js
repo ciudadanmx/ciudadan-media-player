@@ -5,7 +5,7 @@ import { app, BrowserWindow, ipcMain, screen, globalShortcut, clipboard } from '
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolveYouTube, videoIdOf } from './resolver.js';
+import { resolveYouTube, videoIdOf, clearResolveCache } from './resolver.js';
 import { StreamProxy } from './proxy.js';
 import { VlcPlayer, STATE_NAMES } from './vlc.js';
 import { toolVersions } from './tools-info.js';
@@ -53,13 +53,43 @@ const logBuf = [];
 let logFlushTimer = null;
 let consoleCount = 0;
 let consoleWindowStart = Date.now();
+const slowLogWrites = [];   // duración de las escrituras lentas del log (diagnóstico)
+let lastLogWriteMs = 0;
+let logStream = null;
+// El log se escribe con un HANDLE PERSISTENTE: antes se usaba appendFile, que
+// abría y cerraba el fichero en cada volcado (cada 500 ms). El antivirus
+// interceptaba esa apertura y el hilo principal se quedaba bloqueado hasta
+// 5 s por volcado (la app "no servía" la reproducción). Con el stream abierto
+// una sola vez, el antivirus analiza el fichero una vez y no en cada línea.
+function getLogStream() {
+  if (logStream) return logStream;
+  try {
+    logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+    logStream.on('error', () => { try { logStream.destroy(); } catch {} logStream = null; });
+  } catch { logStream = null; }
+  return logStream;
+}
 function flushLog(sync = false) {
   if (!logBuf.length) return;
   const data = logBuf.join('');
   logBuf.length = 0;
   try {
-    if (sync) fs.appendFileSync(LOG_FILE, data);
-    else fs.appendFile(LOG_FILE, data, () => {});
+    if (sync) {
+      fs.appendFileSync(LOG_FILE, data);
+      try { if (logStream) { logStream.end(); logStream = null; } } catch {}
+    } else {
+      const s = getLogStream();
+      if (s) {
+        const t0 = Date.now();
+        s.write(data, () => {
+          const dt = Date.now() - t0;
+          lastLogWriteMs = dt;
+          if (dt > 250) slowLogWrites.push(dt);
+        });
+      } else {
+        fs.appendFile(LOG_FILE, data, () => {});
+      }
+    }
   } catch {}
 }
 const log = (...a) => {
@@ -1494,7 +1524,8 @@ app.whenReady().then(async () => {
     lastTick = now;
     if (lag > 400) {
       stalls++;
-      log('ATASCO: hilo principal bloqueado ' + lag + ' ms (acumulados: ' + stalls + ')');
+      log('ATASCO: hilo principal bloqueado ' + lag + ' ms (acumulados: ' + stalls + ')' +
+        ' | escrituraLog=' + lastLogWriteMs + 'ms lentas=' + JSON.stringify(slowLogWrites.slice(-3)));
       if (stalls === 1 || stalls % 10 === 0) {
         try { emitEvent('playerError', { error: 'hilo principal bloqueado ' + lag + ' ms', kind: 'stall' }, 'system'); } catch {}
       }
@@ -1572,7 +1603,12 @@ app.whenReady().then(async () => {
   // tarda (escaneo de plugins), la app sigue respondiendo y lo avisa.
   (async () => {
     try {
-      proxy = new StreamProxy({ onLog: (m) => log(m) });
+      proxy = new StreamProxy({
+        onLog: (m) => log(m),
+        // Si el CDN rechaza la URL directa (416/403), se invalida la caché de
+        // resoluciones para que la recarga vuelva a preguntar a YouTube.
+        onUrlExpired: (id, status) => { try { clearResolveCache(); log('proxy: URL expirada (' + status + '), se re-resolverá'); } catch {} },
+      });
       const port = await proxy.listen();
       log('proxy en 127.0.0.1:' + port);
     } catch (e) {
@@ -1582,6 +1618,7 @@ app.whenReady().then(async () => {
     try {
       const t0 = Date.now();
       vlc = await VlcPlayer.create({ onTiming: (t) => {
+        if (t.fase) { log('FFI ' + t.fase + ': ' + t.ms + ' ms' + (t.ptrTipo ? ' ptr=' + t.ptr : '') + (t.playerTipo ? ' player=' + t.player : '')); return; }
         log('tiempos de carga (ms): media=' + t.media + ' player=' + t.player + ' play=' + t.play + ' total=' + t.total);
       }, onEvent: (e) => {
         // libVLC repite a veces el mismo evento en ráfaga (p.ej. 20 "Playing"
@@ -1654,12 +1691,19 @@ app.whenReady().then(async () => {
     const pos = vlc.getTime();
     if (pos !== lastProgressPos) { lastProgressPos = pos; lastProgressAt = Date.now(); }
     const quiet = Date.now() - lastProgressAt;
-    if (quiet < 20000) return;
     let why = null;
+    let limit = 20000;
     if (st === 3) why = 'reproduciendo sin avanzar';
+    else if (st === 2 || st === 1) {
+      // Sin datos, libVLC se queda en Buffering/Opening: ANTES esto se
+      // reiniciaba el contador y el medio muerto nunca se recuperaba.
+      limit = 30000;
+      why = 'sin datos (' + (st === 2 ? 'buffering' : 'opening') + ')';
+    }
     else if (st === 4 && !intentionalPause) why = 'pausado sin avanzar (stream muerto)';
     else if ((st === 5 || st === 7) && !intentionalStop) why = 'estado ' + st;
-    if (!why) { lastProgressAt = Date.now(); return; }  // pausa/stop pedidos: no recuperar
+    if (!why) { if (st !== 2 && st !== 1) lastProgressAt = Date.now(); return; }  // pausa/stop pedidos: no recuperar
+    if (quiet < limit) return;
     recover(why);
   }, 5000);
 

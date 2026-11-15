@@ -613,7 +613,8 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
 | `node tools\test-sprint-ui.mjs` | **41/41 PASS** (exit 0) — incluye **el caso reportado por el usuario**: vídeo cargado por URL directa **sin búsqueda previa** → al terminar **sigue con un vídeo relacionado** (`cola automática -> Me at the zoo … @jawed` en el log real); CC SPU real en reproducción (`selected=2` pista real, `-1` desactiva); avance continuo real (zoo → siguiente), modo solo sin avance, historial persistente + búsqueda local + export, `playHistory` sin duplicar (playCount +1), filtros sp persistentes, UI completa vía CDP |
 | `node tools\test-control-api.mjs` | **25/25 PASS** (sin regresión) |
 | `node tools\test-yt-controls.mjs` | **25/25 PASS** (sin regresión) |
-| `node tools\test-search.mjs` | **16/16 PASS** (sin regresión) |
+| `node tools\test-search.mjs` | **16/16 PASS** (sin regresión) — incluye la reproducción real desde la tarjeta (`playing`, `pos 0.0→1.0 s`, `coincide=true`) y el avance automático al terminar (`Me at the zoo` → `aqz-KE-bpKQ` en `playing`) |
+| `node tools\verify-results.mjs "pink floyd"` | **4/4 PASS** — reproducción de **resultados de búsqueda** uno tras otro, 15 s de observación sostenida por vídeo (posición avanzando) y recuento de atascos del hilo principal |
 | `node tools\final-check.mjs` | **PASS** — `playing`, posición 0→4200 ms avanzando, `volumen=100` vía API |
 
 ### 8.4 Limitaciones reales de YouTube/yt-dlp/libVLC (no disimuladas)
@@ -633,4 +634,38 @@ sin pérdida de datos; nunca `localStorage` como almacén principal).
   clientes); la ruta `sp` está cubierta por pruebas unitarias cuando la red es lenta.
 - TTS/STT, DSH1/DSH2 y todas las funciones previas siguen intactos (hash de `AGENTS.md`
   sin cambios en cada suite; sólo se añade al ledger espejo append-only).
+
+### 8.5 Corrección de "no está sirviendo la reproducción de los resultados" (15/11/2026)
+
+Informe del usuario: al pulsar un resultado de búsqueda no se servía la reproducción. No era un
+solo fallo, sino cinco encadenados (todos diagnosticados con evidencia del log y medidos):
+
+| # | Causa raíz | Evidencia | Corrección |
+|---|---|---|---|
+| 1 | **El log bloqueaba el hilo principal**: cada volcado re-abría `app.log` y el antivirus tardaba hasta **5,4 s** por escritura | `ATASCO: … 2310 ms \| escrituraLog=571ms lentas=[478,662,571]` | Log con **handle persistente** (`createWriteStream`): se abre una vez. Atascos: **112 → 8** |
+| 2 | **El proxy tomaba el 416 del CDN como error**: libVLC pide `bytes=69744848-` (un byte **tras** el final = fin de stream normal) y el proxy cortaba el vídeo | `proxy: upstream 416 … range=bytes=69744848-` | El 416 de fin de stream se responde **como EOF** (416 + `Content-Range`); si la URL caducó, se reintenta sin `Range` |
+| 3 | **El vigilante no recuperaba un medio sin datos**: con libVLC en *Buffering/Opening* reiniciaba su propio contador y jamás disparaba | `MEDIO COLGADO` ausente pese a 30 s sin datos | El vigilante atiende también `opening/buffering` (30 s) |
+| 4 | **El resolver no tenía presupuesto**: 90 s por cliente × 7 clientes = hasta **6 min 47 s** esperando y caída a modo *pipe* (sin reproducción) | `avisos del resolver: yt-dlp timeout (android) \|\| … (7)` | `android` + `mweb` **en paralelo**, timeout por cliente, **presupuesto global de 75 s** y **caché de resolución 10 min** |
+| 5 | **Llamadas FFI síncronas a libVLC en el hilo principal** (`media_new_location`, `new_from_media`, `set_media`) | `SONDEO LENTO: sync=3202 ms` | Todas las FFI del ciclo de reproducción van al **hilo worker de koffi** |
+
+Además, el proxy sirve **por tramos de 8 MB** en vez de bajar el vídeo entero de golpe (evita los
+picos de trabajo en el hilo principal) y el *discovery* lanza sus consultas **en paralelo con
+presupuesto de 45 s** (antes iban en serie: 3-4 × 60-120 s).
+
+**Verificación real** (`tools/verify-results.mjs`, app Electron viva, vídeos de YouTube reales):
+
+```
+búsqueda "pink floyd": 4 resultados
+OK   k9ynZnEBtvw "Pink Floyd - The Dark Side Of The Moon"  estado=playing pos 0.0s -> 13.7s (15 s observados)
+OK   84Tq-eAJIk4 "Pink Floyd - Wish You Were Here"         estado=playing pos 0.0s -> 15.0s (15 s observados)
+OK   ai_gI0Jbr_E "Pink Floyd - Pulse"                       estado=playing pos 0.0s -> 16.0s (15 s observados)
+OK   YZzkonEf6Jg "Pink Floyd Collection #Blues #Rock"       estado=playing pos 0.0s -> 14.0s (15 s observados)
+RESULTADOS: 4/4 sirven reproducción real
+ATASCOS del hilo principal en esta sesión: 8
+```
+
+Suites tras la corrección: **65/65** (`test-services`), **16/16** (`test-search`, incluida la
+reproducción desde la tarjeta y el avance automático al terminar), **41/41** (`test-sprint-ui`).
+El test de búsqueda ahora fija él mismo el modo de continuidad (antes dependía de las
+preferencias que dejaba la ejecución anterior: en modo "solo este" no encadena por diseño).
 

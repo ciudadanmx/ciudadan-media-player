@@ -176,18 +176,30 @@ export class VlcPlayer {
     return this._enqueue(async () => {
       const a = this.api;
       const t0 = Date.now();
-      const media = a.libvlc_media_new_location(this.instance, mrl);
+      // Los punteros de koffi son objetos: nunca se convierten con String()
+      // directamente (lanza "Cannot convert object to primitive value").
+      const ptrInfo = (v) => {
+        try { return typeof v + ':' + String(v).slice(0, 24); } catch { return typeof v + ':<obj>'; }
+      };
+      // IMPORTANTE: TODAS las llamadas a libVLC de este bloque se hacen por
+      // koffi en un hilo worker (_call). Antes eran FFI síncronas en el hilo
+      // principal: libvlc_media_new_location / new_from_media / set_media
+      // pueden quedarse varios segundos esperando los locks internos de
+      // libVLC (el hilo principal se quedaba congelado y la app "no servía"
+      // la reproducción). El orden se conserva porque _call es secuencial.
+      const media = await this._call(a.libvlc_media_new_location, this.instance, mrl);
+      this.onTiming?.({ fase: 'media_new_location', ms: Date.now() - t0, ptrTipo: typeof media, ptr: ptrInfo(media) });
       if (!media) throw new Error('libvlc_media_new_location falló: ' + a.libvlc_errmsg());
-      for (const opt of mediaOptions) a.libvlc_media_add_option(media, opt);
+      for (const opt of mediaOptions) await this._call(a.libvlc_media_add_option, media, opt);
       const tMedia = Date.now();
       if (!this.player) {
-        this.player = a.libvlc_media_player_new_from_media(media);
-        if (!this.player) { a.libvlc_media_release(media); throw new Error('libvlc_media_player_new_from_media falló'); }
+        this.player = await this._call(a.libvlc_media_player_new_from_media, media);
+        if (!this.player) { await this._call(a.libvlc_media_release, media); throw new Error('libvlc_media_player_new_from_media falló'); }
         const h = hwnd ?? this._hwnd;
         if (h) {
           const buf = Buffer.isBuffer(h) ? h : Buffer.from(h);
           const val = buf.length >= 8 ? buf.readBigUInt64LE(0) : BigInt(buf.readUInt32LE(0));
-          a.libvlc_media_player_set_hwnd(this.player, val);
+          await this._call(a.libvlc_media_player_set_hwnd, this.player, val);
         }
         this.attachEvents();
         // El motor arranca con el volumen por defecto de su propia configuración:
@@ -205,10 +217,11 @@ export class VlcPlayer {
         if (st !== 6) {
           try { await this._call(a.libvlc_media_player_stop, this.player); } catch {}
         }
-        a.libvlc_media_player_set_media(this.player, media);
+        await this._call(a.libvlc_media_player_set_media, this.player, media);
       }
       const tPlayer = Date.now();
-      a.libvlc_media_release(media);
+      this.onTiming?.({ fase: 'player', ms: tPlayer - tMedia, playerTipo: typeof this.player, player: ptrInfo(this.player) });
+      await this._call(a.libvlc_media_release, media);
       const rc = await this._call(a.libvlc_media_player_play, this.player);
       const tPlay = Date.now();
       this.onTiming?.({
@@ -220,7 +233,10 @@ export class VlcPlayer {
     });
   }
 
-  pause() { if (this.player) this.api.libvlc_media_player_pause(this.player); }
+  async pause() {
+    if (!this.player) return -1;
+    try { return await this._call(this.api.libvlc_media_player_pause, this.player); } catch { return -1; }
+  }
   // Reanuda un medio parado sin bloquear el hilo principal.
   async resume() {
     if (!this.player) return -1;

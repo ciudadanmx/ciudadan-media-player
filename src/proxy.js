@@ -8,9 +8,9 @@ import { spawn } from 'node:child_process';
 import { TOOLS } from './paths.js';
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer']);
-// Tamaño máximo de cada tramo servido al cliente (8 MB): evita que el proxy
-// descargue el vídeo entero de golpe y sature el hilo principal.
-const MAX_CHUNK_BYTES = 8 * 1024 * 1024;
+// Caudal máximo de descarga por conexión (8 MB/s): el CDN entrega el vídeo a
+// toda velocidad y ese trabajo saturaba el hilo principal de Electron.
+const MAX_BYTES_PER_SEC = 8 * 1024 * 1024;
 
 export class StreamProxy {
   constructor(opts = {}) {
@@ -105,21 +105,13 @@ export class StreamProxy {
       if (entry.mode !== 'range' && entry.mode !== 'hls') { res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'mode not proxyable', mode: entry.mode })); return; }
       entry.hits++;
       const headers = { ...(entry.headers || {}) };
-      // El cliente (libVLC) pide "bytes=X-" (rango abierto) y el CDN devuelve
-      // el fichero COMPLETO: el proxy lo bajaba entero de golpe (69 MB) y el
-      // hilo principal se saturaba (retrasos de ~1 s). Se acota cada petición
-      // a un tramo (8 MB): libVLC va pidiendo el siguiente y así el stream
-      // fluye sin picos de trabajo ni descargas masivas de golpe.
+      // El Range del cliente se reenvía TAL CUAL al CDN: libVLC necesita la
+      // respuesta completa (206 con Content-Range) para reproducir y hacer
+      // seek sin quedarse en "opening".
+      // El control del trabajo del hilo principal se hace por caudal (ver
+      // limitador más abajo), no troceando la respuesta.
       let rangoCliente = req.headers.range || '';
-      if (rangoCliente) {
-        const m = /^bytes=(\d+)-(\d*)$/.exec(String(rangoCliente).trim());
-        if (m) {
-          const start = Number(m[1]);
-          const end = m[2] ? Number(m[2]) : start + MAX_CHUNK_BYTES - 1;
-          const tramo = Math.min(end, start + MAX_CHUNK_BYTES - 1);
-          headers['Range'] = `bytes=${start}-${tramo}`;
-        }
-      }
+      if (rangoCliente) headers['Range'] = rangoCliente;
       if (req.headers['user-agent']) headers['User-Agent'] = req.headers['user-agent']; // respeta UA de libVLC si lo envía
       const ac = new AbortController();
       req.on('close', () => { try { ac.abort(); } catch {} });
@@ -187,6 +179,8 @@ export class StreamProxy {
         }
         res.writeHead(upstream.status, outHeaders);
         const reader = Readable.fromWeb(upstream.body);
+        let ventanaIni = Date.now();
+        let ventanaBytes = 0;
         // Vigilancia con ventana rodante: si el upstream deja de mandar datos
         // durante stallTimeoutMs, se corta para que libVLC reciba un error y
         // pueda reintentarse (si no, el vídeo se queda congelado/en negro).
@@ -200,7 +194,24 @@ export class StreamProxy {
             try { res.destroy(); } catch {}
           }, this.stallTimeoutMs);
         };
-        reader.on('data', (c) => { entry.bytes = (entry.bytes || 0) + c.length; armStall(); });
+        reader.on('data', (c) => {
+          entry.bytes = (entry.bytes || 0) + c.length;
+          armStall();
+          // LIMITADOR DE CAUDAL: el CDN entrega el vídeo a toda velocidad (69 MB
+          // en ~8 s) y ese trabajo de red/JS en el hilo principal lo retrasaba
+          // ~1 s por ciclo. Se limita la descarga a MAX_BYTES_PER_SEC: la
+          // reproducción va a 1x, así que sobra de margen y el player no se
+          // queda sin datos.
+          ventanaBytes += c.length;
+          const ahora = Date.now();
+          if (ahora - ventanaIni >= 500) {
+            if (ventanaBytes > MAX_BYTES_PER_SEC * (ahora - ventanaIni) / 1000) {
+              try { reader.pause(); } catch {}
+              const espera = Math.min(400, 100 + Math.round(ventanaBytes / (MAX_BYTES_PER_SEC / 10)));
+              setTimeout(() => { ventanaIni = Date.now(); ventanaBytes = 0; try { reader.resume(); } catch {} }, espera);
+            } else { ventanaIni = ahora; ventanaBytes = 0; }
+          }
+        });
         reader.on('error', (e) => {
           if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
           this.onLog('proxy: error del stream ' + id + ': ' + (e && e.message || e));

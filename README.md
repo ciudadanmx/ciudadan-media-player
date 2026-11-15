@@ -648,9 +648,10 @@ solo fallo, sino cinco encadenados (todos diagnosticados con evidencia del log y
 | 4 | **El resolver no tenía presupuesto**: 90 s por cliente × 7 clientes = hasta **6 min 47 s** esperando y caída a modo *pipe* (sin reproducción) | `avisos del resolver: yt-dlp timeout (android) \|\| … (7)` | `android` + `mweb` **en paralelo**, timeout por cliente, **presupuesto global de 75 s** y **caché de resolución 10 min** |
 | 5 | **Llamadas FFI síncronas a libVLC en el hilo principal** (`media_new_location`, `new_from_media`, `set_media`) | `SONDEO LENTO: sync=3202 ms` | Todas las FFI del ciclo de reproducción van al **hilo worker de koffi** |
 
-Además, el proxy sirve **por tramos de 8 MB** en vez de bajar el vídeo entero de golpe (evita los
-picos de trabajo en el hilo principal) y el *discovery* lanza sus consultas **en paralelo con
-presupuesto de 45 s** (antes iban en serie: 3-4 × 60-120 s).
+Además, el proxy limita el **caudal de descarga a 8 MB/s** (el CDN entrega el vídeo entero a toda
+velocidad y ese trabajo de red/JS en el hilo principal lo retrasaba ~1 s por ciclo) y el
+*discovery* lanza sus consultas **en paralelo con presupuesto de 45 s** (antes iban en serie:
+3-4 × 60-120 s).
 
 **Verificación real** (`tools/verify-results.mjs`, app Electron viva, vídeos de YouTube reales):
 
@@ -661,7 +662,7 @@ OK   84Tq-eAJIk4 "Pink Floyd - Wish You Were Here"         estado=playing pos 0.
 OK   ai_gI0Jbr_E "Pink Floyd - Pulse"                       estado=playing pos 0.0s -> 16.0s (15 s observados)
 OK   YZzkonEf6Jg "Pink Floyd Collection #Blues #Rock"       estado=playing pos 0.0s -> 14.0s (15 s observados)
 RESULTADOS: 4/4 sirven reproducción real
-ATASCOS del hilo principal en esta sesión: 8
+ATASCOS del hilo principal en esta sesión: 1
 ```
 
 Suites tras la corrección: **65/65** (`test-services`), **16/16** (`test-search`, incluida la

@@ -47,9 +47,17 @@ async function apiCmd(command, args = {}) {
   return await res.json().catch(() => null);
 }
 async function apiState() {
-  const res = await fetch(`http://127.0.0.1:${rt.port}/state`, { headers });
-  const b = await res.json().catch(() => null);
-  return b && b.state;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${rt.port}/state`, { headers, signal: AbortSignal.timeout(20000) });
+      const b = await res.json().catch(() => null);
+      return b && b.state;
+    } catch (e) {
+      if (i === 2) return null;   // ECONNRESET puntual: se reintenta
+      await sleep(800);
+    }
+  }
+  return null;
 }
 
 // La app debe estar viva (la lanza el usuario o el script de verificación).

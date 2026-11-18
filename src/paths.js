@@ -7,7 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// La carpeta de VLC puede estar fuera del proyecto (CMP_VLC_DIR). Es
+// necesario cuando el proyecto vive en una unidad sincronizada (Google
+// Drive...): cargar las DLL de libVLC desde allí hace que `libvlc_new`
+// tarde minutos y acabe fallando, y bloquea el hilo principal.
+const VLC_OVERRIDE = process.env.CMP_VLC_DIR ? path.resolve(process.env.CMP_VLC_DIR) : null;
+
 const CANDIDATE_VLC_DIRS = [
+  ...(VLC_OVERRIDE ? [path.join(VLC_OVERRIDE, 'vlc-3.0.23'), VLC_OVERRIDE] : []),
   path.join(ROOT, '.vlc64', 'vlc-3.0.23'),                 // portable win64 del proyecto
   path.join(ROOT, '.vlc64', 'vlc-3.0.24'),
   'C:\\Program Files\\VideoLAN\\VLC',                        // instalación 64 bits

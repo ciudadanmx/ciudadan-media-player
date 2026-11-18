@@ -24,7 +24,18 @@ $data = Join-Path $work 'data'
 $runtime = Join-Path $work 'runtime'
 $tmp = Join-Path $work 'tmp'
 $profile = Join-Path $work 'profile'
+$vlc = Join-Path $work 'vlc64'
 foreach ($d in @($logs, $data, $runtime, $tmp, $profile)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+
+# VLC portable en DISCO LOCAL: cargar libVLC desde una unidad sincronizada
+# (Google Drive) tarda minutos y acaba en "libvlc_new falló (sin instancia)".
+if (-not (Test-Path (Join-Path $vlc 'vlc-3.0.23\libvlc.dll'))) {
+  $src = Join-Path $ProjectRoot '.vlc64'
+  if (Test-Path $src) {
+    Write-Host "Copiando VLC portable a disco local ($vlc)..."
+    robocopy $src $vlc /E /R:2 /W:1 /NFL /NDL /NJH /NP | Out-Null
+  }
+}
 
 # Si ya hay una instancia de esta copia, se cierra (sólo la de esta copia).
 $apiFile = Join-Path $runtime 'control-api.json'
@@ -40,6 +51,7 @@ $env:CMP_DATA_DIR = $data
 $env:CMP_RUNTIME_DIR = $runtime
 $env:CMP_TMPDIR = $tmp
 $env:CMP_USER_DATA = $profile
+$env:CMP_VLC_DIR = $vlc
 $env:CMP_API_PORT = "$ApiPort"
 $env:CMP_SCREEN_INDEX = "$ScreenIndex"
 

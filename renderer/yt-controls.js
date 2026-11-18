@@ -294,6 +294,7 @@ function render(s) {
   icoFull.style.display = s.fullscreen ? 'none' : 'block';
   icoExit.style.display = s.fullscreen ? 'block' : 'none';
   body.classList.toggle('buffering', s.status === 'buffering' || s.status === 'opening');
+  paintTopTitle();
   // Al cambiar de medio se refrescan las pistas de subtítulos disponibles.
   // Las pistas SPU tardan un poco en aparecer (libVLC las enumera tras parsear
   // el medio): se reintenta unas veces antes de concluir "sin pistas".
@@ -410,5 +411,119 @@ document.addEventListener('keydown', (e) => {
 });
 refreshContinuityUI();
 refreshSubtitleUI();
+
+// ---------------------------------------------------------------------------
+// Barra de título SUPERIOR: muestra el vídeo actual (estilo YouTube).
+// ---------------------------------------------------------------------------
+const topTitle = $('topTitle');
+function paintTopTitle() {
+  const t = (state && state.title) ? String(state.title) : '';
+  topTitle.innerHTML = '';
+  if (t) {
+    const b = document.createElement('b');
+    b.textContent = t;
+    topTitle.appendChild(b);
+  } else {
+    topTitle.textContent = 'Ciudadan Media Player';
+  }
+  topTitle.title = t || 'Ciudadan Media Player';
+}
+
+// ---------------------------------------------------------------------------
+// Modal de ESTILO de subtítulos: tamaño, color de texto, color y opacidad del
+// fondo y contorno (stroke) de las letras. Se guarda en las preferencias y
+// el proceso principal lo aplica a libVLC (opciones freetype-*).
+// ---------------------------------------------------------------------------
+const ssModal = $('subStyleModal'), ssBtn = $('subStyleBtn');
+const ssSize = $('ssSize'), ssColor = $('ssColor'), ssBgColor = $('ssBgColor');
+const ssBgOpacity = $('ssBgOpacity'), ssOutlineColor = $('ssOutlineColor');
+const ssOutlineWidth = $('ssOutlineWidth'), ssBold = $('ssBold');
+const ssPreviewText = $('ssPreviewText');
+
+const SS_DEFAULTS = {
+  size: 100, color: '#ffffff', bgColor: '#000000', bgOpacity: 35,
+  outlineColor: '#000000', outlineWidth: 2, bold: false,
+};
+
+function hexToRgb(hex) {
+  const h = String(hex || '#000000').replace('#', '');
+  const v = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const n = parseInt(v, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 };
+}
+function readStyle() {
+  return {
+    size: Number(ssSize.value) || 100,
+    color: ssColor.value,
+    bgColor: ssBgColor.value,
+    bgOpacity: Number(ssBgOpacity.value) || 0,
+    outlineColor: ssOutlineColor.value,
+    outlineWidth: Number(ssOutlineWidth.value) || 0,
+    bold: !!ssBold.checked,
+  };
+}
+function writeStyle(st) {
+  const s = Object.assign({}, SS_DEFAULTS, st || {});
+  ssSize.value = s.size;
+  ssColor.value = s.color;
+  ssBgColor.value = s.bgColor;
+  ssBgOpacity.value = s.bgOpacity;
+  ssOutlineColor.value = s.outlineColor;
+  ssOutlineWidth.value = String(s.outlineWidth);
+  ssBold.checked = !!s.bold;
+  paintStyleLabels();
+  paintStylePreview();
+}
+function paintStyleLabels() {
+  $('ssSizeVal').textContent = ssSize.value + '%';
+  $('ssColorVal').textContent = String(ssColor.value).toUpperCase();
+  $('ssBgColorVal').textContent = String(ssBgColor.value).toUpperCase();
+  $('ssBgOpacityVal').textContent = ssBgOpacity.value + '%';
+  $('ssOutlineColorVal').textContent = String(ssOutlineColor.value).toUpperCase();
+  $('ssOutlineWidthVal').textContent = ssOutlineWidth.value;
+}
+function paintStylePreview() {
+  const s = readStyle();
+  const bg = hexToRgb(s.bgColor);
+  ssPreviewText.style.color = s.color;
+  ssPreviewText.style.fontSize = Math.round(10 + (s.size / 100) * 14) + 'px';
+  ssPreviewText.style.fontWeight = s.bold ? '800' : '700';
+  ssPreviewText.style.background = 'rgba(' + bg.r + ',' + bg.g + ',' + bg.b + ',' + (s.bgOpacity / 100) + ')';
+  const px = s.outlineWidth === 0 ? 0 : s.outlineWidth === 1 ? 1 : s.outlineWidth === 2 ? 2 : 3;
+  ssPreviewText.style.webkitTextStroke = px ? px + 'px ' + s.outlineColor : '0';
+  ssPreviewText.style.paintOrder = 'stroke fill';
+}
+[ssSize, ssBgOpacity, ssOutlineWidth].forEach((el) => el.addEventListener('input', () => { paintStyleLabels(); paintStylePreview(); }));
+[ssColor, ssBgColor, ssOutlineColor].forEach((el) => el.addEventListener('input', () => { paintStyleLabels(); paintStylePreview(); }));
+ssBold.addEventListener('change', paintStylePreview);
+
+async function openSubStyle() {
+  try {
+    const p = await cmp.getSubtitlePrefs();
+    writeStyle((p && p.subtitles && p.subtitles.style) || SS_DEFAULTS);
+  } catch { writeStyle(SS_DEFAULTS); }
+  body.classList.add('showSubStyle');
+  try { $('ssSize').focus(); } catch {}
+}
+function closeSubStyle() { body.classList.remove('showSubStyle'); }
+ssBtn.addEventListener('click', (e) => { e.stopPropagation(); openSubStyle(); });
+$('ssCancel').addEventListener('click', (e) => { e.stopPropagation(); closeSubStyle(); });
+$('ssReset').addEventListener('click', (e) => { e.stopPropagation(); writeStyle(SS_DEFAULTS); });
+$('ssApply').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  const st = readStyle();
+  await cmp.setSubtitleStyle(st).catch(() => {});
+  closeSubStyle();
+});
+ssModal.addEventListener('click', (e) => { if (e.target === ssModal) closeSubStyle(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && body.classList.contains('showSubStyle')) closeSubStyle();
+});
+// Al abrir/cerrar el modal de estilo la barra se aparta (no tapa nada).
+document.addEventListener('click', (e) => {
+  if (body.classList.contains('showSubStyle') && !e.target.closest('#subStyleModal') && !e.target.closest('#subStyleBtn')) {
+    closeSubStyle();
+  }
+});
 
 (async () => { state = await cmp.state(); })();

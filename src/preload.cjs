@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('cmp', {
   getContinuity: () => ipcRenderer.invoke('cmp:get-continuity'),
   setSubtitlePrefs: (payload) => ipcRenderer.invoke('cmp:set-subtitle-prefs', payload),
   getSubtitlePrefs: () => ipcRenderer.invoke('cmp:get-subtitle-prefs'),
+  setSubtitleStyle: (style) => ipcRenderer.invoke('cmp:set-subtitle-style', style),
   subtitleTracks: () => ipcRenderer.invoke('cmp:subtitle-tracks'),
   setSubtitleTrack: (id) => ipcRenderer.invoke('cmp:set-subtitle-track', id),
   historyQuery: (opts) => ipcRenderer.invoke('cmp:history-query', opts),

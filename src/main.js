@@ -23,6 +23,56 @@ import { DiscoveryService } from './discovery.js';
 import { ContinuityEngine } from './continuity.js';
 import { pickTrack, downloadSubtitle, subtitleTracksFromInfo, subsDir, cleanupSubtitles, DEFAULT_SUB_LANGS } from './subtitles.js';
 
+// ---------------------------------------------------------------------------
+// Estilo de los subtítulos -> opciones de libVLC (módulo freetype).
+// El usuario puede fijar tamaño, color del texto, color y opacidad del fondo y
+// el contorno (stroke) de las letras. Los valores se aplican al crear el medio
+// (afectan a las pistas SPU y a las externas) y se guardan en las preferencias.
+// ---------------------------------------------------------------------------
+const SUB_STYLE_DEFAULTS = {
+  size: 100, color: '#ffffff', bgColor: '#000000', bgOpacity: 35,
+  outlineColor: '#000000', outlineWidth: 2, bold: false,
+};
+function normalizeSubtitleStyle(raw) {
+  const s = Object.assign({}, SUB_STYLE_DEFAULTS, raw || {});
+  const hex = (v, def) => {
+    const h = String(v || '').replace('#', '').trim();
+    if (!/^[0-9a-fA-F]{6}$/.test(h)) return def;
+    return '0x' + h.toUpperCase();
+  };
+  const num = (v, def, min, max) => {
+    const n = Number(v);
+    if (!isFinite(n)) return def;
+    return Math.max(min, Math.min(max, Math.round(n)));
+  };
+  return {
+    size: num(s.size, 100, 50, 300),
+    color: hex(s.color, '0xFFFFFF'),
+    bgColor: hex(s.bgColor, '0x000000'),
+    bgOpacity: num(s.bgOpacity, 35, 0, 100),
+    outlineColor: hex(s.outlineColor, '0x000000'),
+    outlineWidth: num(s.outlineWidth, 2, 0, 3),
+    bold: !!s.bold,
+  };
+}
+function subtitleStyleOptions(raw) {
+  const s = normalizeSubtitleStyle(raw);
+  // Tamaño relativo de libVLC: 16 = normal. El porcentaje del usuario se
+  // aplica sobre esa base (100% -> 16, 200% -> 32).
+  const rel = Math.max(8, Math.min(48, Math.round(16 * (s.size / 100))));
+  const opts = [
+    ':freetype-rel-fontsize=' + rel,
+    ':freetype-color=' + s.color,
+    ':freetype-opacity=255',
+    ':freetype-background-color=' + s.bgColor,
+    ':freetype-background-opacity=' + Math.round((s.bgOpacity / 100) * 255),
+    ':freetype-outline-color=' + s.outlineColor,
+    ':freetype-outline-thickness=' + s.outlineWidth,
+    ':freetype-bold=' + (s.bold ? 'true' : 'false'),
+  ];
+  return opts;
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 // Identificador de esta instancia de reproductor (lo usa el coordinador para
@@ -206,7 +256,10 @@ function watchCursor() {
 }
 
 function createWindows() {
-  winVideo = new BrowserWindow({
+  // Monitor de pruebas: con CMP_SCREEN_INDEX=2 la ventana se abre en el
+  // TERCER monitor (para no interferir con lo que el usuario está usando).
+  // Sin la variable, la ventana aparece donde Electron la pone por defecto.
+  let winOpts = {
     width: 960, height: 570, minWidth: 480, minHeight: 300,
     backgroundColor: '#000000', title: 'Ciudadan Media Player',
     icon: APP_ICON,
@@ -214,7 +267,19 @@ function createWindows() {
     // pulsar Alt, como en los reproductores nativos.
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false },
-  });
+  };
+  try {
+    const idx = Number(process.env.CMP_SCREEN_INDEX);
+    if (Number.isFinite(idx) && idx >= 0) {
+      const displays = screen.getAllDisplays();
+      const d = displays[idx];
+      if (d && d.bounds) {
+        winOpts = { ...winOpts, x: d.bounds.x + 40, y: d.bounds.y + 40, width: Math.min(1100, d.bounds.width - 80), height: Math.min(660, d.bounds.height - 100) };
+        log('ventana en el monitor', idx + 1, 'de', displays.length, JSON.stringify(d.bounds));
+      }
+    }
+  } catch (e) { log('no se pudo elegir el monitor:', String(e.message || e)); }
+  winVideo = new BrowserWindow(winOpts);
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
 
   // Barra flotante estilo YouTube: ventana transparente encima del vídeo.
@@ -539,6 +604,11 @@ async function loadUrlInner(url, origin = 'user') {
     switchingMedia = true;
     try { proxy.abortAll(); } catch {}
     const mediaOptions = [':network-caching=1200'];
+    // --- Estilo de los subtítulos (libVLC freetype) --------------------------
+    // Tamaño relativo, color de texto, fondo (color + opacidad) y contorno
+    // (stroke) de las letras. Se aplican como opciones del medio, así que
+    // affectan tanto a las pistas SPU internas como a las externas (slave).
+    for (const opt of subtitleStyleOptions(subPrefs.style)) mediaOptions.push(opt);
     // OJO: con streams HTTP (nuestro proxy) ":sub-file=" NO engancha la pista;
     // hay que usar ":input-slave=file:///..." (verificado con sonda sobre HTTP).
     if (subtitleFile) {
@@ -588,6 +658,21 @@ async function loadUrlInner(url, origin = 'user') {
     log('ERROR load:', currentError);
     return { ok: false, error: currentError };
   }
+}
+
+// Recarga el medio actual conservando la posición de reproducción. Se usa al
+// cambiar el estilo de los subtítulos (el estilo se fija al crear el medio).
+async function reloadCurrentMedia(posMs = 0) {
+  if (!currentUrl) throw new Error('no hay ninguna URL cargada');
+  const r = await loadUrl(currentUrl, 'style');
+  if (!r || !r.ok) throw new Error((r && r.error) || 'no se pudo recargar');
+  const pos = Number(posMs) || 0;
+  if (pos > 1000) {
+    // Se espera un poco a que el medio arranque para que el salto no se pierda.
+    await new Promise((res) => setTimeout(res, 1200));
+    try { await vlc.setTime(pos); log('estilo: medio recargado en', Math.round(pos / 1000) + 's'); } catch {}
+  }
+  return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1140,7 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
       const p = store.setPrefs({ subtitles: {
         enabled: a.enabled !== undefined ? !!a.enabled : store.prefs().subtitles.enabled,
         lang: a.lang !== undefined ? String(a.lang) : store.prefs().subtitles.lang,
+        style: a.style !== undefined ? normalizeSubtitleStyle(a.style) : store.prefs().subtitles.style,
       } });
       // Aplica en caliente sobre el medio actual (sin recrear el reproductor).
       if (vlc && vlc.player) {
@@ -1077,6 +1163,26 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
     }
     case 'getSubtitlePrefs': {
       return { result: { subtitles: store.prefs().subtitles }, state: apiState() };
+    }
+    // Estilo de los subtítulos (tamaño, color, fondo, contorno). El estilo se
+    // fija al crear el medio, así que para que se vea al instante se recarga
+    // el medio actual conservando la posición de reproducción.
+    case 'setSubtitleStyle': {
+      const style = normalizeSubtitleStyle(a.style || a);
+      const prev = store.prefs().subtitles || {};
+      const p = store.setPrefs({ subtitles: { ...prev, style } });
+      log('estilo de subtítulos:', JSON.stringify(style));
+      let reloaded = false;
+      try {
+        if (vlc && vlc.player && currentUrl) {
+          const pos = Math.max(0, toNum(vlc.getTime && vlc.getTime(), 0));
+          await reloadCurrentMedia(pos);
+          reloaded = true;
+        }
+      } catch (e) { log('estilo de subtítulos: no se pudo recargar el medio:', String(e.message || e)); }
+      const st = notifyChange('api', 'subtitles');
+      emitEvent('subtitleStyleChanged', { style, reloaded, state: st }, 'api');
+      return { result: { style: p.subtitles.style, reloaded }, state: st };
     }
     case 'getSubtitleTracks': {
       const tracks = vlc && vlc.player ? await vlc.getSubtitleTracks() : [];
@@ -1242,6 +1348,7 @@ function setupIpc() {
   ipcMain.handle('cmp:get-continuity', () => ({ continuity: continuity.snapshot(), prefs: store.prefs().continuity }));
   ipcMain.handle('cmp:set-subtitle-prefs', (_e, payload) => runRes('setSubtitlePrefs', payload || {}));
   ipcMain.handle('cmp:get-subtitle-prefs', () => ({ subtitles: store.prefs().subtitles }));
+  ipcMain.handle('cmp:set-subtitle-style', (_e, style) => runRes('setSubtitleStyle', { style: style || {} }));
   ipcMain.handle('cmp:subtitle-tracks', async () => {
     const tracks = vlc && vlc.player ? await vlc.getSubtitleTracks().catch(() => []) : [];
     return { tracks, selected: vlc && vlc.player ? (vlc._last.spu ?? -1) : -1 };

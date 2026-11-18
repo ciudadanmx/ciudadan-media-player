@@ -10,15 +10,37 @@
   html,body{margin:0;height:100%;background:transparent;overflow:hidden;user-select:none;
     font-family:'Roboto','Segoe UI',Arial,sans-serif;color:#fff;cursor:default}
   #scrim{position:absolute;left:0;right:0;bottom:0;height:150px;pointer-events:none;
-    background:linear-gradient(to top,rgba(0,0,0,.78) 0%,rgba(0,0,0,.45) 45%,rgba(0,0,0,0) 100%);
+    background:linear-gradient(to top,rgba(8,24,15,.78) 0%,rgba(8,24,15,.45) 45%,rgba(8,24,15,0) 100%);
     opacity:1;transition:opacity .25s ease}
-  #bar{position:absolute;left:10px;right:10px;bottom:10px;height:52px;box-sizing:border-box;
-    display:flex;align-items:center;gap:8px;padding:0 10px;border-radius:12px;
-    background:rgba(24,24,26,.82);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  /* Negro VERDOSO (no gris) en las barras, con la misma transparencia de antes. */
+  #bar{position:absolute;left:10px;right:10px;bottom:10px;height:46px;box-sizing:border-box;
+    display:flex;align-items:center;gap:7px;padding:0 9px;border-radius:12px;
+    background:rgba(12,30,19,.78);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
     box-shadow:0 2px 14px rgba(0,0,0,.45);opacity:1;transform:translateY(0);
+    transition:opacity .22s ease,transform .22s ease}
+  /* Barra de título SUPERIOR (estilo YouTube): sólo aparece al mover el ratón. */
+  #topbar{position:absolute;left:10px;right:10px;top:10px;height:36px;box-sizing:border-box;
+    display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:12px;
+    background:rgba(12,30,19,.68);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    box-shadow:0 2px 14px rgba(0,0,0,.35);opacity:1;transform:translateY(0);
     transition:opacity .22s ease,transform .22s ease}
   body.hidden #scrim{opacity:0}
   body.hidden #bar{opacity:0;transform:translateY(12px);pointer-events:none}
+  body.hidden #topbar{opacity:0;transform:translateY(-12px);pointer-events:none}
+  /* Con el explorador abierto la barra se aparta: no debe tapar las acciones. */
+  body.showModal #bar,body.showModal #topbar{opacity:0;pointer-events:none}
+  body.showModal #scrim{opacity:0}
+  #brand{display:flex;align-items:center;gap:7px;font-size:10.5px;font-weight:800;letter-spacing:1.4px;
+    color:#eafff4;text-transform:uppercase;white-space:nowrap;flex:0 0 auto}
+  #brandDot{width:9px;height:9px;border-radius:50%;background:#d946ef;
+    box-shadow:0 0 8px rgba(217,70,239,.9),0 0 16px rgba(217,70,239,.55)}
+  #topTitle{flex:1;min-width:0;font-size:12.5px;color:#e9f7ef;opacity:.92;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;font-weight:500}
+  #topTitle b{font-weight:700;color:#fff}
+  #topRight{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+  #subStyleBtn{font-size:12px;font-weight:800;letter-spacing:.3px;border-radius:8px;padding:3px 9px;
+    background:rgba(217,70,239,.18);border:1px solid rgba(217,70,239,.45);color:#f5d0fe}
+  #subStyleBtn:hover{background:rgba(217,70,239,.32)}
 
   button{background:none;border:0;color:#fff;cursor:pointer;padding:0;display:flex;
     align-items:center;justify-content:center;border-radius:50%;opacity:.92}
@@ -34,10 +56,13 @@
   /* barra de progreso */
   #track{position:relative;flex:1;height:18px;display:flex;align-items:center;cursor:pointer;min-width:60px}
   #rail{position:relative;width:100%;height:4px;border-radius:2px;background:rgba(255,255,255,.28);overflow:visible}
-  #played{position:absolute;left:0;top:0;bottom:0;background:#ff0000;border-radius:2px;width:0}
+  /* Progreso MORADA NEÓN (antes rojo) */
+  #played{position:absolute;left:0;top:0;bottom:0;border-radius:2px;width:0;
+    background:linear-gradient(90deg,#a855f7 0%,#d946ef 55%,#f0abfc 100%);
+    box-shadow:0 0 7px rgba(217,70,239,.85),0 0 14px rgba(168,85,247,.45)}
   #knob{position:absolute;top:50%;width:13px;height:13px;margin-left:-6.5px;border-radius:50%;
-    background:#ff0000;transform:translateY(-50%) scale(0);transition:transform .12s ease;
-    box-shadow:0 0 4px rgba(0,0,0,.5)}
+    background:#e879f9;transform:translateY(-50%) scale(0);transition:transform .12s ease;
+    box-shadow:0 0 8px rgba(217,70,239,.95),0 0 16px rgba(217,70,239,.55),0 0 4px rgba(0,0,0,.5)}
   #track:hover #knob{transform:translateY(-50%) scale(1)}
   #tip{position:absolute;bottom:26px;transform:translateX(-50%);background:rgba(0,0,0,.85);
     color:#fff;font-size:12px;padding:3px 7px;border-radius:4px;white-space:nowrap;
@@ -56,17 +81,17 @@
   button.ic.txt{width:auto;padding:0 8px;border-radius:8px;font-size:11px;font-weight:700;letter-spacing:.4px}
   button.ic.txt.on{background:rgba(255,255,255,.22);color:#fff}
   button.ic.txt.off{opacity:.55}
-  .bar-sel{background:rgba(24,24,26,.9);color:#e8e8e8;border:1px solid rgba(255,255,255,.25);
+  .bar-sel{background:rgba(12,30,19,.9);color:#e8e8e8;border:1px solid rgba(255,255,255,.25);
     border-radius:8px;font-size:11px;font-weight:600;padding:4px 2px;outline:none;cursor:pointer;max-width:56px}
   /* popovers de la barra (continuidad / pistas de subtítulos) */
-  .bar-pop{position:absolute;right:10px;bottom:66px;width:210px;background:rgba(18,18,20,.96);
+  .bar-pop{position:absolute;right:10px;bottom:62px;width:210px;background:rgba(10,26,17,.96);
     border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:10px 12px;display:none;z-index:40;
     box-shadow:0 8px 30px rgba(0,0,0,.55);font-size:12px;color:#e8e8e8}
   .bar-pop.show{display:block}
-  .bp-title{font-size:11px;color:#9d93b8;margin:4px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .bp-title{font-size:11px;color:#a9d8bd;margin:4px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
   .bp-row{display:flex;align-items:center;gap:7px;padding:4px 2px;cursor:pointer;border-radius:6px}
   .bp-row:hover{background:rgba(255,255,255,.07)}
-  .bp-row input{accent-color:#ff0000}
+  .bp-row input{accent-color:#d946ef}
   .bp-sel{width:100%;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.2);
     border-radius:8px;padding:5px 7px;font-size:12px;outline:none;margin-top:2px}
   .bp-sel option{color:#111}
@@ -74,9 +99,9 @@
   #subTracks button{background:none;border:0;color:#e8e8e8;text-align:left;padding:5px 8px;border-radius:7px;
     cursor:pointer;font-size:12px;display:flex;justify-content:space-between;gap:8px}
   #subTracks button:hover{background:rgba(255,255,255,.09)}
-  #subTracks button.sel{background:rgba(255,0,0,.25);color:#fff}
-  #subTracks .none{color:#9d93b8;font-size:11px;padding:4px 2px}
-  #spin{width:20px;height:20px;border:2.5px solid rgba(255,255,255,.25);border-top-color:#ff0000;
+  #subTracks button.sel{background:rgba(217,70,239,.28);color:#fff}
+  #subTracks .none{color:#a9d8bd;font-size:11px;padding:4px 2px}
+  #spin{width:20px;height:20px;border:2.5px solid rgba(255,255,255,.25);border-top-color:#d946ef;
     border-radius:50%;animation:sp .8s linear infinite;display:none}
   body.buffering #spin{display:block}
   @keyframes sp{to{transform:rotate(360deg)}}
@@ -95,9 +120,9 @@
   #plList::-webkit-scrollbar-track{background:transparent}
   .plItem{display:flex;gap:9px;align-items:flex-start;padding:8px 12px;cursor:pointer;line-height:1.3}
   .plItem:hover{background:rgba(255,255,255,.08)}
-  .plItem.current{background:rgba(255,0,0,.16);box-shadow:inset 3px 0 0 #ff0000}
+  .plItem.current{background:rgba(217,70,239,.18);box-shadow:inset 3px 0 0 #d946ef}
   .plItem .n{width:18px;text-align:right;color:#aaa;font-size:11px;padding-top:2px}
-  .plItem.current .n{color:#ff5555}
+  .plItem.current .n{color:#f0abfc}
   .plItem .t{flex:1;min-width:0}
   .plItem .t b{display:block;font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .plItem .t span{font-size:11px;color:#9a9aa4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block}
@@ -109,10 +134,52 @@
   #modal{position:absolute;inset:0;display:none;pointer-events:none}
   body.showModal #modal{display:block;pointer-events:auto}
   body.showModal #playlist{display:none}
+
+  /* ---- Modal de estilo de subtítulos ---- */
+  #subStyleModal{position:absolute;inset:0;display:none;z-index:60;background:rgba(4,12,8,.55);
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);align-items:center;justify-content:center}
+  body.showSubStyle #subStyleModal{display:flex}
+  #subStyleCard{width:380px;max-width:calc(100% - 40px);max-height:calc(100% - 40px);overflow-y:auto;
+    background:rgba(10,26,17,.97);border:1px solid rgba(217,70,239,.28);border-radius:16px;
+    box-shadow:0 18px 60px rgba(0,0,0,.65);padding:16px 18px 14px;color:#e9f7ef;font-size:12px}
+  #subStyleCard h3{margin:0 0 2px;font-size:14px;font-weight:700;color:#fff;display:flex;align-items:center;gap:8px}
+  #subStyleCard h3 .dot{width:8px;height:8px;border-radius:50%;background:#d946ef;
+    box-shadow:0 0 10px rgba(217,70,239,.9)}
+  #subStyleCard .hint{color:#9dc4ad;font-size:11px;margin:0 0 12px}
+  .ssRow{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid rgba(255,255,255,.07)}
+  .ssRow:first-of-type{border-top:0}
+  .ssRow label{flex:0 0 108px;color:#cfe8d9;font-weight:600;font-size:11.5px}
+  .ssRow input[type=range]{flex:1;accent-color:#d946ef;height:4px}
+  .ssRow input[type=color]{width:38px;height:26px;padding:0;border:1px solid rgba(255,255,255,.25);
+    border-radius:7px;background:none;cursor:pointer}
+  .ssRow select{flex:1;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.2);
+    border-radius:8px;padding:4px 7px;font-size:11.5px;outline:none}
+  .ssVal{flex:0 0 46px;text-align:right;color:#f0abfc;font-variant-numeric:tabular-nums;font-size:11.5px;font-weight:700}
+  #ssPreview{margin:12px 0 10px;border-radius:10px;padding:14px 12px;text-align:center;
+    background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.08)}
+  #ssPreview span{font-size:22px;font-weight:700;letter-spacing:.3px}
+  #ssActions{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
+  .ssBtn{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.07);color:#e9f7ef;
+    border-radius:9px;padding:7px 14px;font-size:12px;font-weight:600;cursor:pointer}
+  .ssBtn:hover{background:rgba(255,255,255,.14)}
+  .ssBtn.primary{background:linear-gradient(90deg,#a855f7,#d946ef);border-color:transparent;color:#fff;
+    box-shadow:0 0 14px rgba(217,70,239,.45)}
+  .ssBtn.primary:hover{filter:brightness(1.12)}
+  .ssCheck{display:flex;align-items:center;gap:6px;color:#cfe8d9;font-size:11.5px;margin-top:6px}
+  .ssCheck input{accent-color:#d946ef}
 </style>
 </head>
 <body>
   <div id="scrim"></div>
+
+  <!-- Barra de título superior (estilo YouTube): aparece al pasar el ratón -->
+  <header id="topbar">
+    <div id="brand"><span id="brandDot"></span>Ciudadan</div>
+    <div id="topTitle"><b>Ciudadan Media Player</b></div>
+    <div id="topRight">
+      <button id="subStyleBtn" title="Estilo de los subtítulos (tamaño, color, fondo y contorno)">Aa</button>
+    </div>
+  </header>
 
   <!-- panel lateral: listas reales del usuario (Favoritos, Ver más tarde, etc.) -->
   <aside id="playlist">
@@ -202,6 +269,60 @@
         <svg id="icoFull" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
         <svg id="icoExit" viewBox="0 0 24 24" style="display:none"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
       </button>
+    </div>
+  </div>
+
+  <!-- Modal de configuración de los subtítulos (tamaño, color, fondo y contorno) -->
+  <div id="subStyleModal">
+    <div id="subStyleCard">
+      <h3><span class="dot"></span>Estilo de los subtítulos</h3>
+      <p class="hint">Se aplica a los subtítulos de libVLC (SPU y pistas externas) y se guarda para la próxima vez.</p>
+
+      <div class="ssRow">
+        <label for="ssSize">Tamaño</label>
+        <input id="ssSize" type="range" min="60" max="220" step="5" value="100">
+        <span class="ssVal" id="ssSizeVal">100%</span>
+      </div>
+      <div class="ssRow">
+        <label for="ssColor">Color del texto</label>
+        <input id="ssColor" type="color" value="#ffffff">
+        <span class="ssVal" id="ssColorVal">#FFFFFF</span>
+      </div>
+      <div class="ssRow">
+        <label for="ssBgColor">Color del fondo</label>
+        <input id="ssBgColor" type="color" value="#000000">
+        <span class="ssVal" id="ssBgColorVal">#000000</span>
+      </div>
+      <div class="ssRow">
+        <label for="ssBgOpacity">Opacidad del fondo</label>
+        <input id="ssBgOpacity" type="range" min="0" max="100" step="5" value="35">
+        <span class="ssVal" id="ssBgOpacityVal">35%</span>
+      </div>
+      <div class="ssRow">
+        <label for="ssOutlineColor">Color del contorno</label>
+        <input id="ssOutlineColor" type="color" value="#000000">
+        <span class="ssVal" id="ssOutlineColorVal">#000000</span>
+      </div>
+      <div class="ssRow">
+        <label for="ssOutlineWidth">Grosor del contorno</label>
+        <select id="ssOutlineWidth">
+          <option value="0">Sin contorno</option>
+          <option value="1">Fino</option>
+          <option value="2" selected>Normal</option>
+          <option value="3">Grueso</option>
+        </select>
+        <span class="ssVal" id="ssOutlineWidthVal">2</span>
+      </div>
+
+      <div id="ssPreview"><span id="ssPreviewText">Así se ven los subtítulos</span></div>
+
+      <label class="ssCheck"><input id="ssBold" type="checkbox"> Texto en negrita</label>
+
+      <div id="ssActions">
+        <button class="ssBtn" id="ssReset" type="button">Restablecer</button>
+        <button class="ssBtn" id="ssCancel" type="button">Cancelar</button>
+        <button class="ssBtn primary" id="ssApply" type="button">Aplicar</button>
+      </div>
     </div>
   </div>
 <link rel="stylesheet" href="search/explorer.css">

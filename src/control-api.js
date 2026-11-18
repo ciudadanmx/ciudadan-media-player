@@ -31,6 +31,7 @@ export const API_COMMANDS = [
   // Sprint: modos, continuidad, subtítulos e historial enriquecido.
   'getPrefs', 'setContentMode', 'setContinuity', 'getContinuity',
   'setSubtitlePrefs', 'getSubtitlePrefs', 'getSubtitleTracks', 'setSubtitleTrack',
+  'setSubtitleStyle',
   'queryHistory', 'removeFromHistory', 'clearHistory', 'exportHistory',
   'getSearchHistory', 'removeSearch', 'playHistory',
   'classify', 'setFilters', 'getFilters',

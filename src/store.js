@@ -29,7 +29,19 @@ function emptyData() {
       contentMode: 'temas',                    // 'musica' | 'temas' | 'personalizado'
       mix: { musicPct: 50, musicCount: 0, themeCount: 0 },
       continuity: { mode: 'continuo', source: 'search' },
-      subtitles: { enabled: true, lang: 'es' },
+      subtitles: {
+        enabled: true, lang: 'es',
+        // Estilo de los subtítulos (se aplica a libVLC con las opciones freetype).
+        style: {
+          size: 100,          // % del tamaño normal
+          color: '#ffffff',   // color del texto
+          bgColor: '#000000', // color del fondo
+          bgOpacity: 35,      // % de opacidad del fondo (transparente)
+          outlineColor: '#000000', // color del contorno (stroke)
+          outlineWidth: 2,    // 0 ninguno, 1 fino, 2 normal, 3 grueso
+          bold: false,
+        },
+      },
       filters: {},
     },
   };
@@ -67,7 +79,11 @@ export class UserStore {
             contentMode: defPrefs.contentMode,
             mix: { ...defPrefs.mix, ...((raw.prefs && raw.prefs.mix) || {}) },
             continuity: { ...defPrefs.continuity, ...((raw.prefs && raw.prefs.continuity) || {}) },
-            subtitles: { ...defPrefs.subtitles, ...((raw.prefs && raw.prefs.subtitles) || {}) },
+            subtitles: {
+              ...defPrefs.subtitles,
+              ...((raw.prefs && raw.prefs.subtitles) || {}),
+              style: { ...defPrefs.subtitles.style, ...(((raw.prefs && raw.prefs.subtitles) || {}).style || {}) },
+            },
             filters: ((raw.prefs && raw.prefs.filters) || {}),
             ...Object.fromEntries(Object.entries(raw.prefs || {}).filter(([k]) => !(k in defPrefs))),
           };

@@ -80,7 +80,12 @@ const ROOT = path.resolve(__dirname, '..');
 // Identificador de esta instancia de reproductor (lo usa el coordinador para
 // distinguir varios reproductores).
 const PLAYER_ID = process.env.CMP_PLAYER_ID || 'ciudadan-media-main';
-const RUNTIME_DIR = path.join(ROOT, 'runtime');
+// Las carpetas de estado (runtime, logs, datos) pueden salirse del proyecto con
+// variables de entorno. Es IMPORTANTE cuando el proyecto vive en una unidad
+// sincronizada (Google Drive, OneDrive...): allí cada escritura pasa por el
+// proceso de sincronización, que bloquea el fichero y ralentiza la app (el log
+// llegó a tardar 1 s por línea y el hilo principal se congelaba).
+const RUNTIME_DIR = process.env.CMP_RUNTIME_DIR || path.join(ROOT, 'runtime');
 const API_FILE = path.join(RUNTIME_DIR, 'control-api.json');
 // Favicon/icono de la app (Ciudadan morado, versión con transparencia)
 const APP_ICON = path.join(ROOT, 'assets', 'favicon-ciudadan-morado-transparente.ico');
@@ -88,10 +93,11 @@ try { app.setAppUserModelId('ciudadan.media.player'); } catch {}
 // Perfil de usuario propio y limpio: un perfil de Electron corrupto en %APPDATA% provoca
 // crash (0xc0000005) del browser process antes de 'ready' en esta máquina.
 app.setPath('userData', process.env.CMP_USER_DATA || path.join(ROOT, '.electron-userdata'));
-const LOG_DIR = path.join(ROOT, 'logs');
+const LOG_DIR = process.env.CMP_LOG_DIR || path.join(ROOT, 'logs');
 // Datos persistentes del usuario (listas, cola, historial): un único JSON.
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.CMP_DATA_DIR || path.join(ROOT, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'ciudadan-media-store.json');
+try { fs.mkdirSync(RUNTIME_DIR, { recursive: true }); } catch {}
 fs.mkdirSync(LOG_DIR, { recursive: true });
 const LOG_FILE = path.join(LOG_DIR, 'app.log');
 fs.writeFileSync(path.join(LOG_DIR, 'main-ran.txt'), 'main.js ejecutado pid=' + process.pid + ' argv=' + JSON.stringify(process.argv) + '\n');

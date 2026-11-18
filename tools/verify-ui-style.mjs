@@ -8,13 +8,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CDP_PORT = Number(process.argv[2] || process.env.CMP_CDP_PORT || 9333);
 const API_PORT = Number(process.argv[3] || process.env.CMP_API_PORT || 17990);
+const RUNTIME_DIR = process.env.CMP_RUNTIME_DIR || path.join(ROOT, 'runtime');
 const API_TOKEN = (() => {
   try {
-    const rt = JSON.parse(fs.readFileSync(path.join(ROOT, 'runtime', 'control-api.json'), 'utf8'));
+    const rt = JSON.parse(fs.readFileSync(path.join(RUNTIME_DIR, 'control-api.json'), 'utf8'));
     return rt.token;
   } catch { return ''; }
 })();
-const SHOTS = path.join(ROOT, 'logs', 'ui-shots');
+const LOG_DIR = process.env.CMP_LOG_DIR || path.join(ROOT, 'logs');
+const SHOTS = path.join(LOG_DIR, 'ui-shots');
 fs.mkdirSync(SHOTS, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -158,7 +160,7 @@ const shotModal2 = await shot('explorador-sin-barra');
 check('captura del explorador sin barra', !!shotModal2, shotModal2 || '');
 
 // --- 8. Estilo aplicado al motor: se carga un vídeo real con subtítulos -----
-const logFile = path.join(ROOT, 'logs', 'app.log');
+const logFile = path.join(LOG_DIR, 'app.log');
 const logBefore = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').length : 0;
 const cmd = await apiCmd('setSubtitleStyle', { style: { size: 175, color: '#e879f9', bgColor: '#0b1a12', bgOpacity: 60, outlineColor: '#d946ef', outlineWidth: 3, bold: true } });
 check('comando setSubtitleStyle aceptado por la API', !!cmd && cmd.result && !!cmd.result.style, JSON.stringify(cmd && cmd.result));

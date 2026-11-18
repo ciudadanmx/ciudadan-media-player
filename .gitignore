@@ -1,18 +1,46 @@
-# Dependencias y binarios externos (se descargan aparte)
+# =============================================================================
+# CIUDADAN MEDIA PLAYER — .gitignore
+# Motivo: el proyecto arrastra binarios pesados (VLC portable, node_modules),
+# estado local de ejecución y artefactos de diagnóstico que NO deben ir al
+# repositorio remoto. El código, la documentación y las herramientas sí.
+# =============================================================================
+
+# --- Dependencias y binarios externos (se descargan aparte) ------------------
 node_modules/
 .vlc64/
 .electron-cache/
 .npm-cache/
+*.asar
 
-# Estado local de ejecución
+# --- Estado local de ejecución ----------------------------------------------
 .tmp/
 logs/
 data/
 runtime/
 .electron-userdata/
+out/
+dist/
+*.tmp
 
-# Sistema / editores
+# --- Artefactos de diagnóstico generados por las pruebas --------------------
+# (sondas de Range/spawn, capturas de CDP, vídeos de prueba descargados)
+.tmp/probe-*/
+*.pid
+*.port
+
+# --- Secretos y credenciales (nunca deben subirse) --------------------------
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+cookies.txt
+runtime/control-api.json
+
+# --- Sistema / editores ------------------------------------------------------
 Thumbs.db
 .DS_Store
 *.lnk
 *.log
+.vscode/
+.idea/

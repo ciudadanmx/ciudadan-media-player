@@ -38,7 +38,7 @@ function normalizeSubtitleStyle(raw) {
   const hex = (v, def) => {
     const h = String(v || '').replace('#', '').trim();
     if (!/^[0-9a-fA-F]{6}$/.test(h)) return def;
-    return '0x' + h.toUpperCase();
+    return '#' + h.toUpperCase();
   };
   const num = (v, def, min, max) => {
     const n = Number(v);
@@ -47,26 +47,28 @@ function normalizeSubtitleStyle(raw) {
   };
   return {
     size: num(s.size, 100, 50, 300),
-    color: hex(s.color, '0xFFFFFF'),
-    bgColor: hex(s.bgColor, '0x000000'),
+    color: hex(s.color, SUB_STYLE_DEFAULTS.color),
+    bgColor: hex(s.bgColor, SUB_STYLE_DEFAULTS.bgColor),
     bgOpacity: num(s.bgOpacity, 35, 0, 100),
-    outlineColor: hex(s.outlineColor, '0x000000'),
+    outlineColor: hex(s.outlineColor, SUB_STYLE_DEFAULTS.outlineColor),
     outlineWidth: num(s.outlineWidth, 2, 0, 3),
     bold: !!s.bold,
   };
 }
 function subtitleStyleOptions(raw) {
   const s = normalizeSubtitleStyle(raw);
+  // libVLC espera los colores en formato 0xRRGGBB.
+  const toVlc = (hex) => '0x' + String(hex).replace('#', '').toUpperCase();
   // Tamaño relativo de libVLC: 16 = normal. El porcentaje del usuario se
   // aplica sobre esa base (100% -> 16, 200% -> 32).
   const rel = Math.max(8, Math.min(48, Math.round(16 * (s.size / 100))));
   const opts = [
     ':freetype-rel-fontsize=' + rel,
-    ':freetype-color=' + s.color,
+    ':freetype-color=' + toVlc(s.color),
     ':freetype-opacity=255',
-    ':freetype-background-color=' + s.bgColor,
+    ':freetype-background-color=' + toVlc(s.bgColor),
     ':freetype-background-opacity=' + Math.round((s.bgOpacity / 100) * 255),
-    ':freetype-outline-color=' + s.outlineColor,
+    ':freetype-outline-color=' + toVlc(s.outlineColor),
     ':freetype-outline-thickness=' + s.outlineWidth,
     ':freetype-bold=' + (s.bold ? 'true' : 'false'),
   ];

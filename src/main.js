@@ -298,14 +298,13 @@ function createWindows() {
   });
 
   // Barra flotante estilo YouTube: ventana transparente encima del vídeo.
-  // Es HIJA de la ventana de vídeo (parent): así se mueve con ella, se
-  // minimiza con ella y no flota por encima de otras aplicaciones (antes iba
-  // con alwaysOnTop y SkipTaskbar, y se quedaba pegada en una pantalla,
-  // sin barra de título, estorbando y sin poder moverse).
+  // Es una ventana INDEPENDIENTE (no hija de la de vídeo): como hija, Electron
+  // la crea como ventana embebida y las coordenadas absolutas de setBounds la
+  // dejaban fuera de la ventana padre (la ventana de vídeo quedaba oculta y
+  // sólo se veía la franja flotando sin poder moverse).
   winOverlay = new BrowserWindow({
-    parent: winVideo,
     frame: false, transparent: true, backgroundColor: '#00000000',
-    skipTaskbar: true, resizable: false, minimizable: false,
+    alwaysOnTop: true, skipTaskbar: true, resizable: false, minimizable: false,
     maximizable: false, fullscreenable: false, hasShadow: false, focusable: true,
     show: false, width: 960, height: 540, icon: APP_ICON,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
@@ -385,11 +384,12 @@ function positionOverlay() {
   if (!winVideo || !winOverlay || winVideo.isDestroyed() || winOverlay.isDestroyed()) return;
   const b = videoContentBounds();
   try {
-    // El overlay es HIJO de la ventana de vídeo: se coloca sobre su área de
-    // contenido y la acompaña (mover, minimizar, Maximizar, pantalla completa).
-    // NO se pone alwaysOnTop: flotaba sobre otras aplicaciones y se quedaba
-    // pegado en una pantalla estorbando, sin poder moverse.
+    // El overlay es una ventana independiente que se coloca justo encima del
+    // área de contenido de la ventana de vídeo y la sigue al moverla.
+    // Va con alwaysOnTop para que quede por encima del vídeo (que es un HWND
+    // embebido de libVLC).
     winOverlay.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
+    winOverlay.setAlwaysOnTop(true);
   } catch {}
 }
 

@@ -341,6 +341,22 @@ function createWindows() {
   winVideo.on('restore', positionOverlay);
   winVideo.on('enter-full-screen', positionOverlay);
   winVideo.on('leave-full-screen', positionOverlay);
+  // Al minimizar u ocultar la ventana de vídeo, la barra flotante se retira:
+  // antes se quedaba pegada en la pantalla (alwaysOnTop) estorbando y sin
+  // poder moverse, porque era una ventana independiente del vídeo.
+  winVideo.on('minimize', () => {
+    hideOverlay();
+    try { winOverlay.hide(); } catch {}
+  });
+  winVideo.on('restore', () => {
+    positionOverlay();
+    try { winOverlay.show(); } catch {}
+    const p = readCursor();
+    const b = videoContentBounds();
+    if (p && p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height) showOverlay(true);
+  });
+  winVideo.on('hide', () => { hideOverlay(); try { winOverlay.hide(); } catch {} });
+  winVideo.on('show', () => { positionOverlay(); try { winOverlay.show(); } catch {} });
   winVideo.on('blur', () => {
     // Se sueltan los atajos globales (sólo deben actuar con el reproductor enfocado).
     unregisterVideoShortcuts();

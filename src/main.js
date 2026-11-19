@@ -289,6 +289,12 @@ function createWindows() {
   } catch (e) { log('no se pudo elegir el monitor:', String(e.message || e)); }
   winVideo = new BrowserWindow(winOpts);
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
+  winVideo.webContents.on('did-finish-load', () => {
+    try { log('video.html cargada; visible=', winVideo.isVisible(), 'minimizada=', winVideo.isMinimized(), JSON.stringify(winVideo.getBounds())); }
+    catch (e) { log('video.html cargada (sin datos de ventana)'); }
+  });
+  winVideo.webContents.on('did-fail-load', (_e, code, desc, url) => log('video.html NO cargó:', code, desc, url));
+  winVideo.webContents.on('render-process-gone', (_e, det) => log('renderer de vídeo:', JSON.stringify(det)));
   winVideo.once('ready-to-show', () => {
     try {
       winVideo.show();

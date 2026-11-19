@@ -29,8 +29,6 @@ dist/
 *.port
 
 # --- Secretos y credenciales (nunca deben subirse) --------------------------
-.env
-.env.*
 *.pem
 *.key
 credentials.json
@@ -42,5 +40,5 @@ Thumbs.db
 .DS_Store
 *.lnk
 *.log
-.vscode/
 .idea/
+config.bat

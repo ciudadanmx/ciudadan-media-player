@@ -26,12 +26,14 @@ try { fs.mkdirSync(TMP_BASE, { recursive: true }); } catch {}
 // Tiempos: YouTube puede ralentizar mucho las peticiones repetidas (una
 // búsqueda puede tardar más de 60 s), así que el margen es amplio. El tiempo
 // de espera se distingue de una cancelación real (mensajes distintos).
-const SEARCH_TIMEOUT_MS = Number(process.env.CMP_SEARCH_TIMEOUT_MS || 120000);
-const SEARCH_DEADLINE_MS = Number(process.env.CMP_SEARCH_DEADLINE_MS || 210000);
+const SEARCH_TIMEOUT_MS = Number(process.env.CMP_SEARCH_TIMEOUT_MS || 60000);
+const SEARCH_DEADLINE_MS = Number(process.env.CMP_SEARCH_DEADLINE_MS || 75000);
 const DETAILS_TIMEOUT_MS = Number(process.env.CMP_DETAILS_TIMEOUT_MS || 90000);
 
 // Caché temporal de resultados (evita repetir la misma búsqueda en poco tiempo).
-const CACHE_TTL_MS = 60_000;
+// 10 minutos: con YouTube limitando las peticiones, repetir la misma búsqueda
+// no debe volver a golpear la red (ni hacer esperar al usuario).
+const CACHE_TTL_MS = Number(process.env.CMP_SEARCH_CACHE_MS || 600000);
 const CACHE_MAX = 30;
 
 // Límite de concurrencia: una búsqueda activa (la nueva cancela la anterior) y
@@ -325,23 +327,32 @@ export class YtDlpSearchProvider extends SearchProvider {
       const target = args[args.length - 1];
       let json = null; let lastErr = null;
       const deadline = Date.now() + SEARCH_DEADLINE_MS;
+      // YouTube ralentiza o bloquea una petición si se repite: en vez de
+      // esperar 120 s a un único cliente y luego reintentar en serie (lo que
+      // dejaba la UI en "Buscando..." más de dos minutos), se prueban DOS
+      // clientes EN PARALELO y se toma el primero que responde.
+      const clientsTry = YT_CLIENTS.slice(0, 2);
+      const perClient = Math.max(20000, Math.min(SEARCH_TIMEOUT_MS, Math.floor((deadline - Date.now()) / 2) || 20000));
+      const group = new AbortController();
+      const abortGroup = () => { try { group.abort(); } catch {} };
+      if (signal) signal.addEventListener('abort', abortGroup, { once: true });
+      ctrl.signal.addEventListener('abort', abortGroup, { once: true });
+      const attempts = clientsTry.map((client) => {
+        const cArgs = args.slice(0, -1);
+        cArgs.push('--extractor-args', `youtube:player_client=${client}`, target);
+        return runYtdlp(cArgs, { timeoutMs: perClient, signal: group.signal })
+          .then((v) => ({ ok: true, v, client }))
+          .catch((e) => ({ ok: false, e, client }));
+      });
       try {
-        json = await runYtdlp(args, { timeoutMs: SEARCH_TIMEOUT_MS, signal: ctrl.signal });
-      } catch (e) {
-        lastErr = e;
-        // Reintento con un cliente concreto si el cliente web pide verificación
-        // o si se agota el tiempo (YouTube ralentiza las peticiones repetidas).
-        for (const client of YT_CLIENTS.slice(0, 3)) {
-          if (Date.now() > deadline) break;   // no se encadena reintentos eternos
-          const left = Math.max(15000, deadline - Date.now());
-          try {
-            const retryArgs = args.slice(0, -1);
-            retryArgs.push('--extractor-args', `youtube:player_client=${client}`, target);
-            json = await runYtdlp(retryArgs, { timeoutMs: Math.min(SEARCH_TIMEOUT_MS, left), signal: ctrl.signal });
-            lastErr = null;
-            break;
-          } catch (e2) { lastErr = e2; }
-        }
+        const r = await Promise.any(attempts);
+        if (r && r.ok) json = r.v;
+        else lastErr = (r && r.e) || new Error('búsqueda sin resultados');
+      } catch (agg) {
+        const errs = (agg && agg.errors) || [];
+        lastErr = errs.find((x) => x && x.ok === false && x.e) || lastErr || new Error('búsqueda sin resultados');
+      } finally {
+        abortGroup();   // cancela el cliente perdedor
       }
       if (!json) throw lastErr || new Error('búsqueda sin resultados');
       const entries = Array.isArray(json.entries) ? json.entries : (json.id ? [json] : []);

@@ -423,10 +423,8 @@ function paintTopTitle() {
     const b = document.createElement('b');
     b.textContent = t;
     topTitle.appendChild(b);
-  } else {
-    topTitle.textContent = 'Ciudadan Media Player';
   }
-  topTitle.title = t || 'Ciudadan Media Player';
+  topTitle.title = t || '';
 }
 
 // ---------------------------------------------------------------------------

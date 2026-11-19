@@ -176,13 +176,42 @@
       toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
     }
 
+    let statusTimer = null;
     function setStatus(kind, msg) {
+      // Un estado que no sea "cargando" detiene el contador de segundos.
+      if (kind !== 'loading' && statusTimer) { clearInterval(statusTimer); statusTimer = null; }
       U.clear(status);
       status.className = 'ex-status' + (kind ? ' ' + kind : '');
       if (!kind) { status.classList.remove('show'); return; }
       status.classList.add('show');
       if (kind === 'loading') status.appendChild(U.el('span', { class: 'ex-spin' }));
       status.appendChild(U.el('span', { text: msg }));
+    }
+
+    // While YouTube responds (which can take a minute when it is throttling),
+    // the elapsed time is shown and after 10 s a note appears explaining that
+    // it is the provider that is slow (not the player). The search can be
+    // cancelled from here.
+    function setStatusLoading(msg, query) {
+      setStatus('loading', msg);
+      if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+      const t0 = Date.now();
+      statusTimer = setInterval(() => {
+        const s = Math.round((Date.now() - t0) / 1000);
+        if (s < 8) return;
+        const lento = s >= 10;
+        setStatus('loading', lento
+          ? ('YouTube está tardando… (' + s + ' s). Se cancelará a los 75 s.')
+          : (msg + ' (' + s + ' s)'));
+        if (lento) {
+          const btn = U.el('button', { class: 'ex-link', text: 'Cancelar' });
+          btn.onclick = () => { try { state.reqId++; } catch {} say('Búsqueda cancelada'); setStatus(null); };
+          status.appendChild(btn);
+        }
+      }, 1000);
+    }
+    function clearStatusLoading() {
+      if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
     }
 
     // ------------------------------------------------------------- búsqueda
@@ -217,7 +246,7 @@
       if (state.loading) return;
       state.loading = true;
       const myReq = ++state.reqId;
-      setStatus('loading', first ? 'Buscando…' : 'Cargando más resultados…');
+      setStatusLoading(first ? 'Buscando…' : 'Cargando más resultados…', state.query);
       more.textContent = '';
       try {
         // La primera página cancela la búsqueda anterior; la paginación NO
@@ -251,6 +280,7 @@
         if (myReq !== state.reqId) return;
         setStatus('error', 'Error de búsqueda: ' + String((e && e.message) || e));
       } finally {
+        clearStatusLoading();
         if (myReq === state.reqId) state.loading = false;
       }
     }

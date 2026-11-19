@@ -32,6 +32,7 @@ export const API_COMMANDS = [
   'getPrefs', 'setContentMode', 'setContinuity', 'getContinuity',
   'setSubtitlePrefs', 'getSubtitlePrefs', 'getSubtitleTracks', 'setSubtitleTrack',
   'setSubtitleStyle',
+  'windowInfo', 'showWindow',
   'queryHistory', 'removeFromHistory', 'clearHistory', 'exportHistory',
   'getSearchHistory', 'removeSearch', 'playHistory',
   'classify', 'setFilters', 'getFilters',

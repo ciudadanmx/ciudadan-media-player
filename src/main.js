@@ -290,7 +290,13 @@ function createWindows() {
   winVideo = new BrowserWindow(winOpts);
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
   winVideo.webContents.on('did-finish-load', () => {
-    try { log('video.html cargada; visible=', winVideo.isVisible(), 'minimizada=', winVideo.isMinimized(), JSON.stringify(winVideo.getBounds())); }
+    try {
+      // La ventana se muestra al terminar de cargar: el evento 'ready-to-show'
+      // no siempre llega (con el vídeo embebido de libVLC el primer paint puede
+      // no ocurrir) y la ventana se quedaba invisible.
+      if (!winVideo.isVisible()) winVideo.show();
+      log('video.html cargada; visible=', winVideo.isVisible(), 'minimizada=', winVideo.isMinimized(), JSON.stringify(winVideo.getBounds()));
+    }
     catch (e) { log('video.html cargada (sin datos de ventana)'); }
   });
   winVideo.webContents.on('did-fail-load', (_e, code, desc, url) => log('video.html NO cargó:', code, desc, url));
@@ -952,6 +958,30 @@ async function executeCommandInner(command, args = {}, origin = 'api') {
     case 'getState': {
       const st = apiState();
       return { result: st, state: st };
+    }
+    case 'windowInfo': {
+      // Estado real de las ventanas: útil para diagnóstico (¿está visible?,
+      // minimizada?, en pantalla completa?, dónde está?).
+      const w = winVideo;
+      const o = winOverlay;
+      const info = {
+        video: w && !w.isDestroyed() ? {
+          visible: w.isVisible(), minimized: w.isMinimized(), maximized: w.isMaximized(),
+          fullscreen: w.isFullScreen(), focused: w.isFocused(), bounds: w.getBounds(),
+        } : null,
+        overlay: o && !o.isDestroyed() ? {
+          visible: o.isVisible(), bounds: o.getBounds(),
+        } : null,
+      };
+      return { result: info, state: apiState() };
+    }
+    case 'showWindow': {
+      if (!winVideo || winVideo.isDestroyed()) throw new Error('la ventana de video esta cerrada');
+      if (winVideo.isMinimized()) winVideo.restore();
+      winVideo.show();
+      winVideo.focus();
+      await new Promise((r) => setTimeout(r, 400));
+      return { result: { visible: winVideo.isVisible(), bounds: winVideo.getBounds() }, state: apiState() };
     }
     case 'fullscreen': {
       if (!winVideo || winVideo.isDestroyed()) throw new Error('la ventana de video esta cerrada');

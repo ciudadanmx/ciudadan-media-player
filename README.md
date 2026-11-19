@@ -670,3 +670,60 @@ reproducción desde la tarjeta y el avance automático al terminar), **41/41** (
 El test de búsqueda ahora fija él mismo el modo de continuidad (antes dependía de las
 preferencias que dejaba la ejecución anterior: en modo "solo este" no encadena por diseño).
 
+### 8.6 Interfaz: barra de título superior, negro verdoso, morada neón y estilo de subtítulos (18/11/2026)
+
+Mejoras de UI pedidas por el usuario, implementadas y verificadas **en la copia de G:** (para no
+tocar la instancia que estaba en uso):
+
+| Cambio | Detalle |
+|---|---|
+| **Barra de título superior** | Franja de 36 px arriba, estilo YouTube: aparece al mover el ratón (misma lógica de auto-ocultado que la inferior), con la marca *Ciudadan*, el **título del vídeo actual** y el botón `Aa` de estilo de subtítulos |
+| **Negro verdoso** | Las dos barras y el degradado de fondo pasan de gris `rgba(24,24,26,.82)` a **negro verdoso** `rgba(12,30,19,.78/.68)` con el mismo `backdrop-filter: blur(10px)` |
+| **Progreso morada neón** | La barra de avance y el cursor (knob) usan un degradado violeta→magenta (`#A855F7 → #D946EF → #F0ABFC`) con halo `box-shadow` neón; el spinner, la lista actual y la pista seleccionada usan la misma familia |
+| **Modal de estilo de subtítulos** | Tamaño (60-220 %), color del texto, color y opacidad del fondo, color y grosor del contorno (stroke), negrita y vista previa en vivo. Se guarda en las preferencias y se aplica a **libVLC** con las opciones `freetype-*` (tamaño relativo, color, opacidad, fondo, contorno y bold) |
+| **La barra no tapa las acciones** | Con el explorador abierto (`body.showModal`) la barra y el degradado se ocultan y no interceptan el ratón |
+
+Al cambiar el estilo, libVLC lo fija al crear el medio, así que el proceso principal **recarga el
+medio conservando la posición** (`reloadCurrentMedia`) para que el cambio se vea al instante.
+
+**Verificación real** (app Electron viva, vídeo real de YouTube):
+
+- `tools\test-sprint-ui.mjs`: **48/48 PASS** (incluye los checks nuevos de la barra superior, los
+  colores, el modal y el comando `setSubtitleStyle`) y **1 atasco** del hilo principal en toda la
+  sesión.
+- `tools\verify-ui-style.mjs` (sobre la copia de G:): **15/16 PASS** — el motor recibió exactamente
+  `:freetype-rel-fontsize=28`, `:freetype-color=0xE879F9`, `:freetype-background-color=0x0B1A12`,
+  `:freetype-background-opacity=153`, `:freetype-outline-color=0xD946EF`,
+  `:freetype-outline-thickness=3`, `:freetype-bold=true`.
+- `tools\verify-results.mjs "pink floyd"`: **4/4** resultados reproduciendo (13-14 s sostenidos).
+- `tools\capture-monitor.mjs` + `tools\analyze-capture.ps1`: captura real del tercer monitor →
+  **544 píxeles morada neón**, **3302 píxeles negro verdoso**, **0 píxeles rojo puro** (el color
+  antiguo de la barra).
+
+### 8.7 Copia de trabajo en G: (Google Drive) y por qué el estado va fuera de la unidad
+
+Copia íntegra del proyecto en `G:\Mi unidad\ciudadan-media-player` (2859 ficheros, 1018 MB).
+La app de la copia se arranca con:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\start-local-copy.ps1 `
+    -ProjectRoot "G:\Mi unidad\ciudadan-media-player" -ScreenIndex 2 -ApiPort 17990
+```
+
+**Hallazgo medido**: en una unidad sincronizada (Google Drive) **el estado de ejecución no puede
+vivir dentro del proyecto**:
+
+| Problema | Medición | Causa | Solución |
+|---|---|---|---|
+| El log congelaba el hilo principal | escrituras de 100 ms a 1 s; **175 atascos** | Drive intercepta y bloquea cada escritura | `CMP_LOG_DIR` fuera de la unidad sincronizada |
+| libVLC no arrancaba | `libvlc_new falló (sin instancia)` tras **5 min** | Las DLL se leen por la API de Drive | `CMP_VLC_DIR` con el VLC portable en disco local |
+| Arranque lento la primera vez | **184 s** para `libVLC listo` | El antivirus escanea la copia nueva | Con la caché del antivirus: **11 s** |
+| El perfil de Electron también ralentiza | — | Chromium escribe mucho | `CMP_USER_DATA` fuera de la unidad |
+
+Por eso `main.js` y `paths.js` aceptan `CMP_LOG_DIR`, `CMP_DATA_DIR`, `CMP_RUNTIME_DIR`,
+`CMP_TMPDIR`, `CMP_USER_DATA` y `CMP_VLC_DIR`: **el código puede vivir en Drive; el estado, no**.
+Con el estado en local, la misma app da **0-2 atascos** (contra 175 en Drive).
+
+Además, `CMP_SCREEN_INDEX` abre la ventana en el monitor elegido (2 = el tercero), que es como se
+hicieron las pruebas sin interferir con lo que el usuario tenía en pantalla.
+

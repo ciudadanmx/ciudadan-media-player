@@ -289,6 +289,13 @@ function createWindows() {
   } catch (e) { log('no se pudo elegir el monitor:', String(e.message || e)); }
   winVideo = new BrowserWindow(winOpts);
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
+  winVideo.once('ready-to-show', () => {
+    try {
+      winVideo.show();
+      winVideo.focus();
+      log('ventana de video: visible=', winVideo.isVisible(), 'minimizada=', winVideo.isMinimized(), 'fullscreen=', winVideo.isFullScreen(), JSON.stringify(winVideo.getBounds()));
+    } catch (e) { log('ventana de video: no se pudo mostrar:', String(e.message || e)); }
+  });
 
   // Barra flotante estilo YouTube: ventana transparente encima del vídeo.
   // Es HIJA de la ventana de vídeo (parent): así se mueve con ella, se

@@ -173,8 +173,10 @@ const opts = (logTxt.match(/opts=.*$/m) || [])[0] || '';
 check('el motor recibe las opciones freetype del estilo',
   /freetype-rel-fontsize=28/.test(opts) && /freetype-color=0xE879F9/.test(opts)
   && /freetype-outline-thickness=3/.test(opts) && /freetype-background-opacity=153/.test(opts), opts.slice(0, 300) || 'sin coincidencia');
-const st2 = await apiCmd('getState').catch(() => null);
-check('el vídeo sigue reproduciéndose con el estilo aplicado', !!(st2 && st2.result && st2.result.state), JSON.stringify(st2 && st2.result && st2.result.state && { status: st2.result.state.status, pos: st2.result.state.position }));
+const st2 = await fetch(`http://127.0.0.1:${API_PORT}/state`, { headers: { Authorization: 'Bearer ' + API_TOKEN } })
+  .then((r) => r.json()).catch(() => null);
+const s2 = st2 && st2.state ? st2.state : null;
+check('el vídeo sigue reproduciéndose con el estilo aplicado', !!(s2 && (s2.status === 'playing' || s2.status === 'buffering' || s2.status === 'opening')), JSON.stringify(s2 && { status: s2.status, pos: s2.position, title: s2.title }));
 
 console.log(`\n== ${pass}/${pass + fail} comprobaciones PASS ==`);
 process.exit(fail ? 1 : 0);

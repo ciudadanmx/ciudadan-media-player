@@ -21,6 +21,7 @@ const results = [];
 const limitations = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let child = null;
+let logStart = 0;
 
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok, detail: String(detail) });
@@ -108,6 +109,13 @@ async function waitStatus(want, ms = 120000, pred = null) {
 
 async function main() {
   console.log('== sprint: app real con vídeo de 19 s (fin rápido) ==');
+  // Los atascos del hilo principal se cuentan SOLO de esta sesión (el log es
+  // acumulativo): se guarda el tamaño del log antes de arrancar la app.
+  logStart = 0;
+  try {
+    const lf = path.join(ROOT, 'logs', 'app.log');
+    if (fs.existsSync(lf)) logStart = fs.statSync(lf).size;
+  } catch {}
   launch();
   if (!await waitApi()) { check('la app arranca con el API', false); finish(); return; }
   check('la app arranca con el API', true, 'puerto ' + API_PORT);
@@ -304,6 +312,45 @@ async function main() {
       return {a:p.subtitles.enabled, b:p2.subtitles.enabled};})()`);
     check('botón CC conmuta enabled y persiste', ccToggle.a === false && ccToggle.b === true, JSON.stringify(ccToggle));
 
+    // ---- Barra de título SUPERIOR + colores (verde-negro / morada neón) -------
+    const topUi = await cdpEval(`(()=>{const t=document.getElementById('topbar');
+      const bar=document.getElementById('bar'), pl=document.getElementById('played'), kn=document.getElementById('knob');
+      const g=(el)=>el?getComputedStyle(el):null;
+      return { top: !!t, alto: t?Math.round(t.getBoundingClientRect().height):0,
+        arriba: t?Math.round(t.getBoundingClientRect().top):-1,
+        topFondo: g(t)?g(t).backgroundColor:'', barFondo: g(bar)?g(bar).backgroundColor:'',
+        played: g(pl)?g(pl).backgroundImage:'', knob: g(kn)?g(kn).backgroundColor:'',
+        knobSombra: g(kn)?g(kn).boxShadow:'' };})()`);
+    const verdeOk = (c) => { const m = String(c || '').match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      return !!m && +m[2] > +m[1] && +m[2] > +m[3] && +m[2] < 90; };
+    check('barra de título superior (estilo YouTube) presente', !!topUi.top && topUi.alto > 20 && topUi.arriba <= 12, JSON.stringify(topUi));
+    check('barras en negro verdoso (arriba y abajo)', verdeOk(topUi.topFondo) && verdeOk(topUi.barFondo), JSON.stringify({ top: topUi.topFondo, abajo: topUi.barFondo }));
+    check('barra de progreso morada neón (no roja)', /rgb\(2\d\d, ?\d{1,3}, ?2\d\d\)/i.test(topUi.played || '') && !/#ff0000|rgb\(255, ?0, ?0\)/i.test(topUi.played || ''), topUi.played);
+    check('knob del progreso morada con brillo neón', /rgb\(2\d\d, ?\d{1,3}, ?2\d\d\)/i.test(topUi.knob || '') && /rgba?\(217, ?70, ?239/.test(topUi.knobSombra || ''), topUi.knob);
+
+    // ---- Modal de estilo de subtítulos (tamaño, color, fondo, contorno) ------
+    const ssUi = await cdpEval(`(async()=>{document.getElementById('subStyleBtn').click();
+      await new Promise(r=>setTimeout(r,400));
+      const m=document.getElementById('subStyleModal');
+      const vis=m?getComputedStyle(m).display:'';
+      const campos=['ssSize','ssColor','ssBgColor','ssBgOpacity','ssOutlineColor','ssOutlineWidth'].filter(id=>!!document.getElementById(id));
+      document.getElementById('ssCancel').click();
+      return { visible: !!m && vis!=='none', campos };})()`);
+    check('modal de estilo de subtítulos abre con tamaño, colores, fondo y contorno',
+      !!ssUi.visible && ssUi.campos.length === 6, JSON.stringify(ssUi));
+    const ssApply = await cdpEval(`(async()=>{document.getElementById('subStyleBtn').click();
+      document.getElementById('ssSize').value='150'; document.getElementById('ssSize').dispatchEvent(new Event('input'));
+      document.getElementById('ssColor').value='#e879f9'; document.getElementById('ssColor').dispatchEvent(new Event('input'));
+      document.getElementById('ssOutlineWidth').value='3'; document.getElementById('ssOutlineWidth').dispatchEvent(new Event('input'));
+      document.getElementById('ssApply').click();
+      await new Promise(r=>setTimeout(r,1200));
+      const p=await window.cmp.getSubtitlePrefs();
+      return p.subtitles.style;})()`);
+    check('el estilo de subtítulos se guarda en las preferencias',
+      !!ssApply && Number(ssApply.size) === 150 && String(ssApply.color).toUpperCase() === '#E879F9' && Number(ssApply.outlineWidth) === 3, JSON.stringify(ssApply));
+    const ssApi = await apiCmd('setSubtitleStyle', { style: { size: 100, color: '#ffffff', bgColor: '#000000', bgOpacity: 35, outlineColor: '#000000', outlineWidth: 2, bold: false } });
+    check('comando setSubtitleStyle disponible por API', !!(ssApi && ssApi.result && ssApi.result.style), JSON.stringify(ssApi && ssApi.result));
+
     // explorador: abrir modal
     await cdpEval(`document.getElementById('search').click()`);
     await sleep(1200);
@@ -394,6 +441,22 @@ async function main() {
 
 function finish() {
   try { if (child) child.kill(); } catch {}
+  // Atascos del hilo principal durante la sesión: un valor alto indica que la
+  // app se froze (el log, el antivirus o una unidad sincronizada).
+  try {
+    const logFile = path.join(ROOT, 'logs', 'app.log');
+    if (fs.existsSync(logFile)) {
+      const fd = fs.openSync(logFile, 'r');
+      const size = fs.fstatSync(fd).size;
+      const len = Math.max(0, size - logStart);
+      const buf = Buffer.alloc(len);
+      if (len > 0) fs.readSync(fd, buf, 0, len, logStart);
+      fs.closeSync(fd);
+      const stalls = (buf.toString('utf8').match(/ATASCO: hilo principal bloqueado/g) || []).length;
+      console.log('ATASCOS del hilo principal en esta sesión: ' + stalls);
+      if (stalls > 30) limitations.push({ name: 'rendimiento', reason: stalls + ' atascos del hilo principal registrados en esta sesión' });
+    }
+  } catch {}
   const out = { pass: results.every((r) => r.ok), total: results.length, limitations, results };
   fs.writeFileSync(path.join(ROOT, 'logs', 'sprint-ui-test.json'), JSON.stringify(out, null, 2));
   const failed = results.filter((r) => !r.ok);

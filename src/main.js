@@ -291,9 +291,14 @@ function createWindows() {
   winVideo.loadFile(path.join(ROOT, 'renderer', 'video.html'));
 
   // Barra flotante estilo YouTube: ventana transparente encima del vídeo.
+  // Es HIJA de la ventana de vídeo (parent): así se mueve con ella, se
+  // minimiza con ella y no flota por encima de otras aplicaciones (antes iba
+  // con alwaysOnTop y SkipTaskbar, y se quedaba pegada en una pantalla,
+  // sin barra de título, estorbando y sin poder moverse).
   winOverlay = new BrowserWindow({
+    parent: winVideo,
     frame: false, transparent: true, backgroundColor: '#00000000',
-    alwaysOnTop: true, skipTaskbar: true, resizable: false, minimizable: false,
+    skipTaskbar: true, resizable: false, minimizable: false,
     maximizable: false, fullscreenable: false, hasShadow: false, focusable: true,
     show: false, width: 960, height: 540, icon: APP_ICON,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
@@ -373,8 +378,11 @@ function positionOverlay() {
   if (!winVideo || !winOverlay || winVideo.isDestroyed() || winOverlay.isDestroyed()) return;
   const b = videoContentBounds();
   try {
+    // El overlay es HIJO de la ventana de vídeo: se coloca sobre su área de
+    // contenido y la acompaña (mover, minimizar, Maximizar, pantalla completa).
+    // NO se pone alwaysOnTop: flotaba sobre otras aplicaciones y se quedaba
+    // pegado en una pantalla estorbando, sin poder moverse.
     winOverlay.setBounds({ x: b.x, y: b.y, width: b.width, height: b.height });
-    winOverlay.setAlwaysOnTop(true);
   } catch {}
 }
 

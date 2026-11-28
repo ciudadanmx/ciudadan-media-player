@@ -17,6 +17,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SearchProvider } from './provider.js';
 import { TOOLS, YT_CLIENTS } from '../paths.js';
+import { SP as SP_CODES } from './sp-codes.js';
+import { searchDirect } from './youtube-web-search.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -164,16 +166,8 @@ export function normalizeEntry(entry, providerId = 'ytdlp') {
 }
 
 // --- filtros de búsqueda ------------------------------------------------------
-// Códigos "sp" de la página de resultados de YouTube (parámetro de filtro de la
-// propia web). Se aplican en el PROVEEDOR (YouTube filtra de verdad); los que no
-// existen ahí se aplican en local y se marcan con scope:'local'.
-const SP = {
-  type: { video: 'EgIQAQ==', channel: 'EgIQAg==', playlist: 'EgIQAw==', live: 'EgJAAQ==', movie: 'EgIQBA==' },
-  sort: { date: 'CAI==', views: 'CAM==', rating: 'CAE==' },
-  date: { hour: 'EgIIAQ==', today: 'EgIIAg==', week: 'EgIIAw==', month: 'EgIIBA==', year: 'EgIIBQ==' },
-  duration: { short: 'EgIYAw==', medium: 'EgIYAf==', long: 'EgIYAg==' },
-  features: { cc: 'EgIwAQ==', hd: 'EgI4AQ==', '4k': 'EgI4AQE==', live: 'EgJAAQ==', '360': 'EgI4AXAB', hdr: 'EgI4AZgB' },
-};
+// Los códigos "sp" viven en ./sp-codes.js (los usan también la búsqueda directa).
+const SP = SP_CODES;
 
 function ymd(d) {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
@@ -319,6 +313,20 @@ export class YtDlpSearchProvider extends SearchProvider {
     if (signal) signal.addEventListener('abort', () => { try { ctrl.abort(); } catch {} }, { once: true });
 
     try {
+      // VÍA RÁPIDA primero: una sola petición HTTP a la página de resultados de
+      // YouTube (~2 s). Si YouTube la bloquea o cambia el HTML, se cae al
+      // respaldo de yt-dlp (más lento pero robusto). Así el usuario no se
+      // queda mirando "Buscando..." durante un minuto.
+      try {
+        const fast = await searchDirect(q, { limit: n, offset: off, filters: filters || {}, signal: ctrl.signal });
+        if (fast && fast.items && fast.items.length) {
+          const out = { items: fast.items, hasMore: !!fast.hasMore, source: 'web-direct' };
+          this._cache.set(cacheKey, { at: Date.now(), value: out });
+          if (this._cache.size > CACHE_MAX) this._cache.delete(this._cache.keys().next().value);
+          return out;
+        }
+      } catch { /* la vía rápida falló: sigue con yt-dlp */ }
+
       // Búsqueda ligera: no resuelve formatos ni descarga nada.
       const built = buildSearchArgs(q, { limit: n, offset: off, filters: filters || {} });
       const args = built.args;

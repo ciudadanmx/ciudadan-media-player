@@ -14,6 +14,7 @@ param(
   [string]$ProjectRoot = 'G:\Mi unidad\ciudadan-media-player',
   [int]$ScreenIndex = 2,          # 0 = principal, 2 = tercer monitor
   [int]$ApiPort = 17990,
+  [int]$DebugPort = 18144,        # puerto de depuración (CDP) con -Debug
   [switch]$Debug
 )
 
@@ -59,7 +60,14 @@ $electron = Join-Path $ProjectRoot 'node_modules\electron\dist\electron.exe'
 if (-not (Test-Path $electron)) { throw "No se encuentra Electron en $electron" }
 
 $args = @('.', '--no-sandbox', "--user-data-dir=$profile")
-if ($Debug) { $args += "--remote-debugging-port=$($ApiPort + 143)" }
+if ($Debug) {
+  # Si el puerto de depuración está ocupado se avisa (Electron lo ignora en
+  # silencio y las pruebas por CDP fallan sin explicación clara).
+  $ocupado = Get-NetTCPConnection -LocalPort $DebugPort -State Listen -ErrorAction SilentlyContinue
+  if ($ocupado) { Write-Host "AVISO: el puerto $DebugPort ya está en uso; se elige otro."; $DebugPort = $DebugPort + 1 }
+  $args += "--remote-debugging-port=$DebugPort"
+  Write-Host "  depuración (CDP): http://127.0.0.1:$DebugPort"
+}
 Start-Process -FilePath $electron -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden
 
 Write-Host "Ciudadan Media Player (copia) arrancada desde: $ProjectRoot"

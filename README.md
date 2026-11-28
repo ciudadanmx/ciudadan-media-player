@@ -727,3 +727,31 @@ Con el estado en local, la misma app da **0-2 atascos** (contra 175 en Drive).
 Además, `CMP_SCREEN_INDEX` abre la ventana en el monitor elegido (2 = el tercero), que es como se
 hicieron las pruebas sin interferir con lo que el usuario tenía en pantalla.
 
+### 8.8 Búsqueda rápida, ventana de vídeo visible y barra de título (28/11/2026)
+
+**Búsqueda: de 28-90 s a ~2 s.** Con el anti-bot de YouTube, `yt-dlp` tardaba 30-90 s por consulta
+(medido: 49 s, y todos los clientes —web, mweb, android, tv, ios— superaron los 90 s en otro
+momento) y la interfaz se quedaba en "Buscando…" sin resultados.
+
+| Cambio | Detalle |
+|---|---|
+| **Vía directa** (`src/search/youtube-web-search.js`) | Una sola petición HTTP a la página de resultados de YouTube y se lee el `ytInitialData` embebido: **1,8-2,7 s** con título, canal, duración, miniatura y vistas |
+| **Respaldo** | Si esa vía falla (cambia el HTML, bloquea la IP), el proveedor cae al camino de yt-dlp, que sigue siendo robusto |
+| **Dos clientes en paralelo** | El respaldo de yt-dlp prueba `android` y `mweb` a la vez y se queda con el primero que responde (antes eran 3 reintentos en serie de hasta 210 s) |
+| **Caché de 10 minutos** | Repetir la misma búsqueda ya no golpea la red (antes 60 s) |
+| **Precalentamiento** | Al arrancar se abre la conexión con YouTube en segundo plano: sin esto la *primera* búsqueda tardaba (TLS en frío) y caía al respaldo |
+| **Interfaz** | El estado muestra los segundos transcurridos, avisa "YouTube está tardando…" a partir de 10 s y ofrece **Cancelar** |
+
+**Ventana de vídeo visible.** La ventana de vídeo se creaba pero se quedaba oculta (`ready-to-show`
+no llegaba con el HWND de libVLC embebido), así que sólo se veía la barra flotante: sin barra de
+título, sin barra de tareas y sin poder moverse. Ahora la ventana se muestra al terminar de
+cargar, la barra flotante se retira al minimizarla y ambas ventanas quedan visibles con marco.
+
+**Barra de título.** Se quitó el texto "Ciudadan" de la barra superior (queda sólo el punto neón) y
+el auto-ocultado verificado oculta **barra inferior, barra de título y degradado** a la vez.
+
+**Verificación** (`tools\verify-ui-final.mjs`, sobre la copia de G:, API 17990, CDP 18144):
+**6/6 PASS** — marca eliminada, auto-ocultado completo, búsqueda con resultados en **2,7 s** y
+modal de estilo de subtítulos con sus 6 controles. Además `tools\verify-play-from-result.mjs`
+carga un resultado de búsqueda y comprueba que **la posición avanza 15 s** (reproducción real).
+

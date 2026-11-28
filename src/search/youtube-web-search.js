@@ -98,8 +98,28 @@ export function parseInitialData(html) {
   return out;
 }
 
+/**
+ * Precalienta la conexión con YouTube (TLS + DNS). Sin esto, la PRIMERA
+ * búsqueda tras arrancar tarda más de 15 s (conexión en frío) y se cae al
+ * respaldo lento; con esto, la primera búsqueda ya va rápida.
+ */
+export async function warmUp() {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, 20000);
+    await fetch('https://www.youtube.com/results?search_query=test', {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': UA, 'Accept-Language': 'es-MX,es;q=0.9' },
+    });
+    clearTimeout(timer);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Devuelve los resultados por la vía rápida; null si esta vía no sirve. */
-export async function searchDirect(query, { limit = 20, offset = 0, filters = {}, signal = null, timeoutMs = 15000 } = {}) {
+export async function searchDirect(query, { limit = 20, offset = 0, filters = {}, signal = null, timeoutMs = 25000 } = {}) {
   const url = buildResultsUrl(query, filters);
   const t0 = Date.now();
   const ctrl = new AbortController();

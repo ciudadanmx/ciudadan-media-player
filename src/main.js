@@ -1690,6 +1690,12 @@ app.whenReady().then(async () => {
   } catch (e) {
     log('ERROR createWindows:', (e && e.stack) || String(e));
   }
+  // Precalienta la conexión con YouTube en segundo plano: sin esto, la primera
+  // búsqueda tras arrancar tarda (TLS en frío) y cae al respaldo lento.
+  try {
+    const { warmUp } = await import('./search/youtube-web-search.js');
+    warmUp().then((ok) => log('precalentamiento de busqueda:', ok ? 'listo' : 'no se pudo'));
+  } catch {}
   setupIpc();
   engineReady = false;
   engineReadyPromise = new Promise((r) => { resolveEngineReady = r; });

@@ -119,8 +119,11 @@ export async function searchDirect(query, { limit = 20, offset = 0, filters = {}
     const items = parseInitialData(html);
     if (!items.length) return null;
     return { items: items.slice(offset, offset + limit), hasMore: items.length > offset + limit, source: 'web-direct' };
-  } catch {
-    return null;   // esta vía falló: el proveedor usa el respaldo (yt-dlp)
+  } catch (e) {
+    // Esta vía falló: el proveedor usa el respaldo (yt-dlp). Se deja traza
+    // para saber POR QUÉ se cayó (cambio en el HTML, bloqueo de IP, timeout).
+    console.log('[busqueda-web] via directa fallida:', String((e && e.message) || e));
+    return null;
   } finally {
     clearTimeout(timer);
   }

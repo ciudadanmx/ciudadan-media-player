@@ -101,6 +101,7 @@ export function parseInitialData(html) {
 /** Devuelve los resultados por la vía rápida; null si esta vía no sirve. */
 export async function searchDirect(query, { limit = 20, offset = 0, filters = {}, signal = null, timeoutMs = 15000 } = {}) {
   const url = buildResultsUrl(query, filters);
+  const t0 = Date.now();
   const ctrl = new AbortController();
   const timer = setTimeout(() => { try { ctrl.abort(); } catch {} }, timeoutMs);
   const onAbort = () => { try { ctrl.abort(); } catch {} };
@@ -114,10 +115,17 @@ export async function searchDirect(query, { limit = 20, offset = 0, filters = {}
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log('[busqueda-web] respuesta HTTP', res.status, 'en', Math.round((Date.now() - t0) / 100) / 10, 's');
+      return null;
+    }
     const html = await res.text();
     const items = parseInitialData(html);
-    if (!items.length) return null;
+    if (!items.length) {
+      console.log('[busqueda-web] 0 vídeos parseados de', html.length, 'bytes (¿cambió el HTML de YouTube?)');
+      return null;
+    }
+    console.log('[busqueda-web] OK en', Math.round((Date.now() - t0) / 100) / 10, 's:', items.length, 'vídeos');
     return { items: items.slice(offset, offset + limit), hasMore: items.length > offset + limit, source: 'web-direct' };
   } catch (e) {
     // Esta vía falló: el proveedor usa el respaldo (yt-dlp). Se deja traza
